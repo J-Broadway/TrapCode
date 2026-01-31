@@ -1,0 +1,52 @@
+---
+description: TrapCode development workflow
+alwaysApply: true
+---
+
+# TrapCode Workflow
+
+TrapCode is a Python library designed to streamline scripting in FL Studio's VFX Script environment. It provides abstractions for MIDI voice handling, UI control creation, parameter management, output controllers, and export proxies. The library aims to reduce boilerplate code while offering intuitive, TouchDesigner-inspired APIs for creative coding in audio/MIDI effects.
+
+See README.md for TrapCode.py documentation
+
+`scope.py` is the working environment for TrapCode development. FL Studio's built-in VFX Script editor is limited, so code is written/edited in `scope.py` and copy-pasted into FL Studio's VFX Script.
+
+# VFX Script Documentation
+
+VFX Script is a Patcher plugin in FL Studio that allows real-time transformation of MIDI notes and automation parameters using Python. See "VFX Script (Default)/" directory for native VFX Script code examples.
+
+## Official Documentation
+
+- [VFX Script Manual](https://www.image-line.com/fl-studio-learning/fl-studio-beta-online-manual/html/plugins/VFX%20Script.htm) - Full reference including API, examples, and tutorials
+- [Piano Roll Scripting API](https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/html/pianoroll_scripting_api.htm) - ScriptDialog class documentation for UI controls
+- [VFX Scripting Forum](https://forum.image-line.com/viewforum.php?f=2053) - Community scripts and support
+
+## Python API Resources
+
+- [FL Studio Python API Stubs](https://il-group.github.io/FL-Studio-API-Stubs/) - Type hints and documentation for IDE support
+- [GitHub: FL-Studio-API-Stubs](https://github.com/MaddyGuthridge/FL-Studio-API-Stubs) - Source repository
+
+## API Reference
+
+| Object | Method | Description |
+|--------|--------|-------------|
+| `vfx` | `addOutputController(name, default)` | Defines an output controller pin |
+| `vfx` | `setOutputController(name, value)` | Sets output controller value |
+| `vfx.context` | `voices` | List of active Voice objects |
+| `vfx.context` | `ticks` | Current clock time in PPQ ticks |
+| `vfx.context` | `PPQ` | Pulses per quarter note |
+| `vfx.context` | `isPlaying` | True if transport is playing |
+| `vfx.Voice` | `note`, `velocity`, `pan`, `length` | Voice properties |
+| `vfx.Voice` | `trigger()`, `release()` | Control voice playback |
+| `vfx.ScriptDialog` | `addInputKnob()`, `addInputKnobInt()` | Add UI controls |
+| `vfx.ScriptDialog` | `addInputCheckbox()`, `addInputCombo()` | Add UI controls |
+| `vfx.ScriptDialog` | `addGroup()`, `endGroup()` | Group UI controls |
+
+## Event Handlers
+
+| Function | Description |
+|----------|-------------|
+| `createDialog()` | Define script UI, must return `vfx.ScriptDialog` |
+| `onTick()` | Called every tick for continuous processing |
+| `onTriggerVoice(incomingVoice)` | Called when a note is triggered |
+| `onReleaseVoice(incomingVoice)` | Called when a note is released |
