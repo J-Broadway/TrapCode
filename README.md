@@ -276,10 +276,25 @@ def onTick():
         print(f"Selected option {tc.par.MyCombo.val}")
     
     # Optional callback receives (new_val, old_val)
-    tc.par.MyCheck.changed(lambda new, old: print(f"{old} -> {new}"))
+    tc.par.MyCheck.changed(callback=lambda new, old: print(f"{old} -> {new}"))
 ```
 
 Change detection compares the current value to the previous check. Works regardless of FL Studio playback state.
+
+**Threshold** (numeric controls only):
+```python
+# Only detect changes >= threshold (filters small movements)
+if tc.par.Pitch.changed(threshold=12):  # Full octave
+    print(f"Pitch jumped to {tc.par.Pitch.val}")
+
+# Knob 0-100: ignore sub-integer jitter
+if tc.par.MyKnob.changed(threshold=1):
+    print("Significant change")
+```
+
+The baseline updates only when a change is detected. If knob moves `0 → 0.3 → 0.6 → 1.0` with `threshold=1`, only the final step triggers (when delta from 0 reaches 1.0). Threshold is ignored for non-numeric types (Checkbox, Combo, Text).
+
+**Note**: All `changed()` calls on a control share the same baseline. If checking the same control with different thresholds, be aware they interact—whichever call triggers first updates the baseline.
 
 **Note**: Surface presets are saved to `~/Documents/Image-Line/Presets/Plugin presets/Effects/Control Surface/`
 

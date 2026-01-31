@@ -15,7 +15,7 @@ def onTick():
     if btn.pulse():
         myNote.trigger()
     
-    if tc.par.ChangeMe.changed():
+    if tc.par.ChangeMe.changed(threshold=1):
         myNote.m = int(tc.par.ChangeMe.val)
         myNote.trigger()
     

@@ -48,15 +48,23 @@ class PulseMixin:
 class EdgeMixin:
     """Mixin for detecting value transitions on controls."""
     
-    def changed(self, callback=None):
+    def changed(self, threshold=None, callback=None):
         """
         Detect value change since last check.
         
         Args:
+            threshold: Minimum delta to trigger change (numeric controls only).
+                       None or 0 means any change triggers. Ignored for non-numeric
+                       types (Checkbox, Combo, Text).
             callback: Optional callback(new_val, old_val) on change
         
         Returns:
             True if value changed, False otherwise
+        
+        Note:
+            All changed() calls on a control share the same baseline. When any
+            call detects a change, the baseline updates. If checking the same
+            control with different thresholds, be aware they interact.
         """
         current = self.val
         prev = getattr(self, '_edge_prev', None)
@@ -66,7 +74,14 @@ class EdgeMixin:
             self._edge_prev = current
             return False
         
-        did_change = current != prev
+        # Determine if change occurred
+        if threshold and isinstance(current, (int, float)) and isinstance(prev, (int, float)):
+            # Threshold mode: compare absolute delta
+            did_change = abs(current - prev) >= threshold
+        else:
+            # Default: any change
+            did_change = current != prev
+        
         if did_change:
             self._edge_prev = current
             if callback is not None:
