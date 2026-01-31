@@ -1,6 +1,6 @@
 # Voice Triggering Architecture
 
-## Status: In Design
+## Status: Phase 1 Complete
 
 **Related docs:**
 - [Research](../research/strudel_supercollider_research.md) — Strudel/SuperCollider patterns
@@ -522,14 +522,20 @@ This approach is critical because:
 ### Phase 1: Core Note + One-Shot Trigger
 **Scope**: Simplest possible note triggering — no looping yet.
 
-- [ ] `tc.Note(m, v, l)` builder (no `n` string notation yet)
-- [ ] `.trigger()` one-shot only (fires once, releases after `l` beats)
-- [ ] `tc.update()` scheduler stub
-- [ ] `tc.beats_to_ticks()` helper
+- [x] `tc.Note(m, v, l)` builder (no `n` string notation yet)
+- [x] `.trigger()` one-shot only (fires once, releases after `l` beats)
+- [x] `tc.update()` scheduler
+- [x] `tc.beats_to_ticks()` helper
+- [x] `cut=True/False` parameter (pulled forward from Phase 1.5)
 
 **User test**: Can trigger a note from a button press, note releases automatically.
 
-**Status**: Not started
+**Status**: Complete
+
+**Implementation notes**:
+- Uses `voice.length` for auto-release (works regardless of FL playback state)
+- Velocity normalized from MIDI 0-127 to FL's 0-1 range
+- Note instances must persist outside `onTick()` for cut behavior to work
 
 ---
 
@@ -539,7 +545,7 @@ This approach is critical because:
 - [ ] `.trigger(b=1)` loops every beat
 - [ ] `.trigger(b=1).once()` one-shot with beat timing
 - [ ] `.stop()` to halt loop
-- [ ] `cut=True/False` parameter
+- [x] `cut=True/False` parameter (done in Phase 1)
 
 **User test**: Note loops on beat, can stop it, cut behavior works.
 
@@ -657,5 +663,22 @@ Established iterative development cycle:
 Broke phases into smaller chunks with clear "user test" criteria. Each phase depends on feedback from previous. This prevents architectural mistakes from compounding.
 
 **Next step**: Begin Phase 1 scope dialogue.
+
+### 2026-02-01: Phase 1 Complete
+
+Implemented and tested:
+- `tc.Note(m, v, l)` builder with MIDI note, velocity, length in beats
+- `.trigger(l=None, cut=True)` one-shot with optional length override and cut behavior
+- `tc.update()` scheduler for processing triggers
+- `tc.beats_to_ticks()` helper exposed for advanced users
+
+Key learnings during implementation:
+- `vfx.context.ticks` only advances during playback — use `voice.length` for reliable auto-release
+- `voice.velocity` expects 0-1 normalized, not MIDI 0-127
+- Note instances must persist outside `onTick()` for per-note voice tracking (cut behavior)
+
+Pulled `cut=True/False` forward from Phase 1.5 based on user feedback.
+
+**Next step**: Phase 1.5 (looping triggers) when ready.
 
 ---

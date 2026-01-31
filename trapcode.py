@@ -19,6 +19,49 @@ def _warn_clamp(name, value, lo, hi):
         where = f" (line {caller.lineno})" if caller else ""
         print(f"[TrapCode]{where} '{name}' value {value} outside [{lo}, {hi}] -> clamped")
 
+def _recover_value(name, default, value_type=float, min_val=None, max_val=None):
+    """
+    Try to recover previous UI value, fallback to default.
+    
+    Checks two sources:
+    1. Cached state on vfx module (persists across recompiles)
+    2. Old form context (if available)
+    
+    Args:
+        name: Control name to look up
+        default: Fallback value if recovery fails
+        value_type: Type to coerce (float, int, bool, str)
+        min_val/max_val: Optional range clamping
+    
+    Returns:
+        Previous value if found, otherwise default
+    """
+    # Try cached state first (persists on vfx module)
+    try:
+        if hasattr(vfx, '_tc_state') and name in vfx._tc_state:
+            prev = value_type(vfx._tc_state[name])
+            if min_val is not None and max_val is not None:
+                prev = _clamp(prev, min_val, max_val)
+            return prev
+    except:
+        pass
+    
+    # Try old form context
+    try:
+        prev = value_type(vfx.context.form.getInputValue(name))
+        if min_val is not None and max_val is not None:
+            prev = _clamp(prev, min_val, max_val)
+        return prev
+    except:
+        return default
+
+
+def _cache_value(name, value):
+    """Cache a control value on vfx module for persistence across recompiles."""
+    if not hasattr(vfx, '_tc_state'):
+        vfx._tc_state = {}
+    vfx._tc_state[name] = value
+
 # -----------------------------
 # Mixins
 # -----------------------------
@@ -312,6 +355,7 @@ class UI:
         _read_only_attrs = ['name', 'default', 'min', 'max', 'hint']
         def __init__(self, form, name='Knob', d=0, min=0, max=1, hint=''):
             self._form = form
+            d = _recover_value(name, d, float, min, max)
             object.__setattr__(self, 'name', name)
             object.__setattr__(self, 'default', d)
             object.__setattr__(self, 'min', min)
@@ -321,7 +365,9 @@ class UI:
         @property
         def val(self):
             try:
-                return vfx.context.form.getInputValue(self.name)
+                v = vfx.context.form.getInputValue(self.name)
+                _cache_value(self.name, v)
+                return v
             except AttributeError:
                 return self.default
         @val.setter
@@ -338,6 +384,7 @@ class UI:
         _read_only_attrs = ['name', 'default', 'min', 'max', 'hint']
         def __init__(self, form, name='KnobInt', d=0, min=0, max=1, hint=''):
             self._form = form
+            d = _recover_value(name, d, int, min, max)
             object.__setattr__(self, 'name', name)
             object.__setattr__(self, 'default', int(d))
             object.__setattr__(self, 'min', int(min))
@@ -347,7 +394,9 @@ class UI:
         @property
         def val(self):
             try:
-                return int(vfx.context.form.getInputValue(self.name))
+                v = int(vfx.context.form.getInputValue(self.name))
+                _cache_value(self.name, v)
+                return v
             except (AttributeError, TypeError, ValueError):
                 return int(self.default)
         @val.setter
@@ -366,6 +415,7 @@ class UI:
         _read_only_attrs = ['name', 'default', 'hint']
         def __init__(self, form, name='Checkbox', default=False, hint=''):
             self._form = form
+            default = _recover_value(name, default, bool)
             object.__setattr__(self, 'name', name)
             object.__setattr__(self, 'default', bool(default))
             object.__setattr__(self, 'hint', hint)
@@ -373,7 +423,9 @@ class UI:
         @property
         def val(self):
             try:
-                return bool(vfx.context.form.getInputValue(self.name))
+                v = bool(vfx.context.form.getInputValue(self.name))
+                _cache_value(self.name, v)
+                return v
             except AttributeError:
                 return bool(self.default)
         @val.setter
@@ -399,13 +451,15 @@ class UI:
                     raise ValueError(f"Default '{d}' not in options {options}")
             if not isinstance(d, int):
                 raise TypeError("Default must be int (index) or matching str")
-            d = _clamp(d, 0, max(0, len(options) - 1))
+            d = _recover_value(name, d, int, 0, max(0, len(options) - 1))
             object.__setattr__(self, 'default', d)
             form.addInputCombo(name, options, d, hint)
         @property
         def val(self):
             try:
-                return int(vfx.context.form.getInputValue(self.name))
+                v = int(vfx.context.form.getInputValue(self.name))
+                _cache_value(self.name, v)
+                return v
             except (AttributeError, TypeError, ValueError):
                 return int(self.default)
         @val.setter
@@ -428,13 +482,16 @@ class UI:
         _read_only_attrs = ['name', 'default']
         def __init__(self, form, name='Text', default=''):
             self._form = form
+            default = _recover_value(name, default, str)
             object.__setattr__(self, 'name', name)
             object.__setattr__(self, 'default', default)
             form.addInputText(name, default)
         @property
         def val(self):
             try:
-                return vfx.context.form.getInputValue(self.name)
+                v = vfx.context.form.getInputValue(self.name)
+                _cache_value(self.name, v)
+                return v
             except AttributeError:
                 return self.default
         @val.setter
