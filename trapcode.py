@@ -20,6 +20,63 @@ def _warn_clamp(name, value, lo, hi):
         print(f"[TrapCode]{where} '{name}' value {value} outside [{lo}, {hi}] -> clamped")
 
 # -----------------------------
+# Mixins
+# -----------------------------
+class PulseMixin:
+    """Mixin for pulse detection on clickable controls."""
+    def pulse(self, on_click=None):
+        """
+        Detect button/checkbox press and fire callback.
+        
+        Args:
+            on_click: Optional callback function, called once per click
+        
+        Returns:
+            True if control was clicked this tick, False otherwise
+        """
+        if self.val == 1:
+            self.val = 0  # reset
+            if on_click is not None:
+                try:
+                    on_click()
+                except Exception as e:
+                    print(f"[TrapCode] pulse on_click error: {e}")
+            return True
+        return False
+
+
+class EdgeMixin:
+    """Mixin for detecting value transitions on controls."""
+    
+    def changed(self, callback=None):
+        """
+        Detect value change since last check.
+        
+        Args:
+            callback: Optional callback(new_val, old_val) on change
+        
+        Returns:
+            True if value changed, False otherwise
+        """
+        current = self.val
+        prev = getattr(self, '_edge_prev', None)
+        
+        # First call: initialize, no change
+        if prev is None:
+            self._edge_prev = current
+            return False
+        
+        did_change = current != prev
+        if did_change:
+            self._edge_prev = current
+            if callback is not None:
+                try:
+                    callback(current, prev)
+                except Exception as e:
+                    print(f"[TrapCode] changed callback error: {e}")
+        return did_change
+
+# -----------------------------
 # MIDI voice helper
 # -----------------------------
 class MIDI(vfx.Voice):
@@ -236,7 +293,7 @@ class UI:
         return _Group()
 
     # ------------- Controls
-    class KnobWrapper(BaseWrapper):
+    class KnobWrapper(BaseWrapper, EdgeMixin):
         _read_only_attrs = ['name', 'default', 'min', 'max', 'hint']
         def __init__(self, form, name='Knob', d=0, min=0, max=1, hint=''):
             self._form = form
@@ -262,7 +319,7 @@ class UI:
                 pass
         def __str__(self): return str(self.val)
 
-    class KnobIntWrapper(BaseWrapper):
+    class KnobIntWrapper(BaseWrapper, EdgeMixin):
         _read_only_attrs = ['name', 'default', 'min', 'max', 'hint']
         def __init__(self, form, name='KnobInt', d=0, min=0, max=1, hint=''):
             self._form = form
@@ -290,7 +347,7 @@ class UI:
                 pass
         def __str__(self): return str(self.val)
 
-    class CheckboxWrapper(BaseWrapper):
+    class CheckboxWrapper(BaseWrapper, PulseMixin, EdgeMixin):
         _read_only_attrs = ['name', 'default', 'hint']
         def __init__(self, form, name='Checkbox', default=False, hint=''):
             self._form = form
@@ -312,7 +369,7 @@ class UI:
                 pass
         def __str__(self): return str(self.val)
 
-    class ComboWrapper(BaseWrapper):
+    class ComboWrapper(BaseWrapper, EdgeMixin):
         _read_only_attrs = ['name', 'options', 'default', 'hint']
         def __init__(self, form, name='Combo', options=None, d=0, hint=''):
             self._form = form
@@ -352,7 +409,7 @@ class UI:
                 pass
         def __str__(self): return str(self.val)
 
-    class TextWrapper(BaseWrapper):
+    class TextWrapper(BaseWrapper, EdgeMixin):
         _read_only_attrs = ['name', 'default']
         def __init__(self, form, name='Text', default=''):
             self._form = form
@@ -442,3 +499,46 @@ class UI:
         return self._create_control(self.TextWrapper, name, par_name,
                                     export=export, export_name=export_name,
                                     default=default)
+
+    def Surface(self):
+        """Embed a Control Surface preset. Must be set via Options arrow in VFX Script."""
+        self.form.addInputSurface('')
+
+
+# -----------------------------
+# Control Surface element access
+# -----------------------------
+class SurfaceWrapper(PulseMixin, EdgeMixin):
+    """Wrapper for accessing Control Surface elements by name."""
+    def __init__(self, name):
+        self._name = name
+
+    @property
+    def val(self):
+        try:
+            return vfx.context.form.getInputValue(self._name)
+        except AttributeError:
+            return 0
+
+    @val.setter
+    def val(self, value):
+        try:
+            vfx.context.form.setNormalizedValue(self._name, float(value))
+        except AttributeError:
+            pass
+
+    def __repr__(self):
+        return f"<SurfaceWrapper {self._name}={self.val}>"
+
+
+_surface_cache = {}  # {name: SurfaceWrapper}
+
+def surface(name):
+    """Access a Control Surface element by name. Returns a wrapper with .val property."""
+    if name not in _surface_cache:
+        _surface_cache[name] = SurfaceWrapper(name)
+    return _surface_cache[name]
+
+
+# Initialization message
+print("[TrapCode] Initialized")

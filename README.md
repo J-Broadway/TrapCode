@@ -81,25 +81,25 @@ ui.Knob(par_name='123invalid')  # Raises ValueError (invalid identifier)
 ui.Knob(par_name='my_knob')     # Raises ValueError if 'my_knob' already exists
 ```
 
-### 4. Export Controllers
-Manage output controllers with `tc.export`.
+### 4. Output Controllers
+Manage output controllers with `tc.output`.
 
 - `add(name, default=0.0)`: Adds a controller if not declared.
 - `set(name, value)`: Sets the controller value.
 
-Note that `tc.export.add()` will not work inside `def onTick()`, `def onTriggerVoice()`, or `def onReleaseVoice()`. This is because output controllers must be declared during the script's initialization phase (e.g., inside `createDialog()` or at the module level outside any functions), as the host environment (FL Studio) sets up the parameter interface once at load time. Adding controllers dynamically during runtime callbacks may fail silently or cause errors, since the parameter interface is fixed after the script is loaded. Controllers are only added if `export` mode is 'bind' or 'custom' during UI creation (see Section 6). Manual `tc.export.add()` is for custom scenarios outside UI bindings.
+Note that `tc.output.add()` will not work inside `def onTick()`, `def onTriggerVoice()`, or `def onReleaseVoice()`. This is because output controllers must be declared during the script's initialization phase (e.g., inside `createDialog()` or at the module level outside any functions), as the host environment (FL Studio) sets up the parameter interface once at load time. Adding controllers dynamically during runtime callbacks may fail silently or cause errors, since the parameter interface is fixed after the script is loaded. Controllers are only added if `export` mode is 'bind' or 'custom' during UI creation (see Section 6). Manual `tc.output.add()` is for custom scenarios outside UI bindings.
 
 **Code Example**:
 ```python
 import TrapCode as tc
-tc.export.add('MyOut', default=0.5)
-tc.export.set('MyOut', 1.0)
+tc.output.add('MyOut', default=0.5)
+tc.output.set('MyOut', 1.0)
 ```
 
 **Edge Case**:
 ```python
-tc.export.add('MyOut', default='invalid')  # Defaults to 0.0 (coerces to float)
-tc.export.set('NonExistent', 1.0)  # May fail silently if not added
+tc.output.add('MyOut', default='invalid')  # Defaults to 0.0 (coerces to float)
+tc.output.set('NonExistent', 1.0)  # May fail silently if not added
 ```
 
 ### 5. Exports (Batch Update and Proxies)
@@ -136,7 +136,7 @@ tc.exports.update()  # If exception in custom mode, skips silently (robustness f
 ```
 
 ### 6. UI Controls
-Create and manage UI elements with factory methods. All support `name` (UI label), `par_name` (optional custom attribute name on `tc.par`, defaults to sanitized `name`), `export` (mode: None/'bind'/'custom', defaults to None), and `export_name` (optional custom output controller name, defaults to `par_name`). If mode is set, adds a controller via `tc.export.add()`.
+Create and manage UI elements with factory methods. All support `name` (UI label), `par_name` (optional custom attribute name on `tc.par`, defaults to sanitized `name`), `export` (mode: None/'bind'/'custom', defaults to None), and `export_name` (optional custom output controller name, defaults to `par_name`). If mode is set, adds a controller via `tc.output.add()`.
 
 For grouped controls, values are accessed internally using qualified keys like `"Group: Control"` to handle hierarchy correctly, but users interact via plain `par.par_name.val`.
 
@@ -214,6 +214,74 @@ tc.par.MyText.val = '123'  # In bind, pushes 123.0
 tc.par.MyText.val = 'abc'  # In bind, pushes export_default (e.g., 1.0)
 tc.par.MyText.export_default = 'invalid'  # Raises ValueError (must float)
 ```
+
+#### Surface (Embedded Control Surface)
+Embed a Control Surface preset for custom UI elements like buttons, XY pads, and graphics.
+
+**Setup**:
+1. In VFX Script, click **Options arrow → Embed Surface Preset**
+2. Select your Control Surface preset
+3. Add `ui.Surface()` in `createDialog()`
+
+**Code Example**:
+```python
+def createDialog():
+    ui = tc.UI()
+    ui.Knob(name='Speed', d=0.5)
+    ui.Surface()  # embeds the Control Surface preset
+    return ui.form
+
+def onTick():
+    # Access surface elements by name
+    btn = tc.surface('mybtn')
+    knob = tc.surface('myknob')
+    
+    print(btn.val)    # read value
+    knob.val = 0.5    # set value (normalized 0-1)
+```
+
+**Pulse Helper** (available on Surface buttons and Checkboxes):
+```python
+def handleClick():
+    print("Clicked!")
+
+# Detect button press (Control Surface)
+btn = tc.surface('mybtn')
+btn.pulse(on_click=handleClick)
+
+# Detect checkbox click (native UI)
+tc.par.MyCheckbox.pulse(on_click=handleClick)
+```
+
+Pulse arguments:
+- `on_click`: Optional callback, called once per click
+
+**Change Detection** (available on all controls):
+```python
+def onTick():
+    btn = tc.surface('mybtn')
+    
+    # Detect value changes (fires once per transition)
+    if btn.changed():
+        if btn.val:
+            print("Turned on")
+        else:
+            print("Turned off")
+    
+    # Works on any control type
+    if tc.par.MyKnob.changed():
+        print(f"Knob moved to {tc.par.MyKnob.val}")
+    
+    if tc.par.MyCombo.changed():
+        print(f"Selected option {tc.par.MyCombo.val}")
+    
+    # Optional callback receives (new_val, old_val)
+    tc.par.MyCheck.changed(lambda new, old: print(f"{old} -> {new}"))
+```
+
+Change detection compares the current value to the previous check. Works regardless of FL Studio playback state.
+
+**Note**: Surface presets are saved to `~/Documents/Image-Line/Presets/Plugin presets/Effects/Control Surface/`
 
 ### 7. Arithmetic and Coercion
 Wrappers support math operations and coercion.
