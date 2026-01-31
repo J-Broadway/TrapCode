@@ -364,4 +364,75 @@ print(tc.groups())  # e.g., ['Settings', 'test']
 # If no groups: [] (empty list)
 ```
 
+### 11. Voice Triggering (Note API)
+Programmatic MIDI note creation with beat-relative timing.
+
+#### Note Class
+Create notes with MIDI number, velocity, and length in beats.
+
+```python
+myNote = tc.Note(m=72, v=100, l=1)  # C5, velocity 100, 1 beat (quarter note)
+```
+
+Parameters:
+- `m`: MIDI note number (0-127), required
+- `v`: Velocity (0-127), default 100
+- `l`: Length in beats, default 1 (quarter note)
+
+Beat values:
+| Value | Duration |
+|-------|----------|
+| `4` | Whole note |
+| `2` | Half note |
+| `1` | Quarter note |
+| `0.5` | Eighth note |
+| `0.25` | Sixteenth note |
+
+#### Triggering Notes
+Call `.trigger()` to queue a one-shot note, then `tc.update()` in `onTick()` to process.
+
+**Important**: Create Note instances outside `onTick()` so they persist across ticks. This is required for cut behavior to work (voice tracking).
+
+```python
+# Create once at module level
+myNote = tc.Note(m=72, v=100, l=1)
+
+def onTick():
+    btn = tc.surface('mybtn')
+    if btn.pulse():
+        myNote.trigger()       # Queue the note
+        myNote.trigger(l=0.5)  # Override length to half beat
+    tc.update()  # Process triggers and releases
+```
+
+The note fires immediately and auto-releases after the specified length.
+
+**Dynamic pitch**: Update properties before triggering:
+
+```python
+myNote = tc.Note(m=60, v=100, l=1)
+
+def onTick():
+    myNote.m = int(tc.par.PitchKnob.val)  # Update pitch from UI
+    if tc.surface('btn').pulse():
+        myNote.trigger()
+    tc.update()
+```
+
+**Cut behavior** (default): Retriggering a note releases the previous voice first, preventing overlap:
+
+```python
+myNote.trigger()            # cut=True (default), releases previous
+myNote.trigger(cut=False)   # Allow overlapping voices
+```
+
+#### Helper Function
+`tc.beats_to_ticks(beats)`: Convert beats to ticks for advanced timing.
+
+```python
+ticks = tc.beats_to_ticks(1)  # Returns PPQ (ticks per quarter note)
+```
+
+**Important**: Always call `tc.update()` in `onTick()` for triggers to fire and voices to release.
+
 Call `tc.exports.update()` in `onTick()` to push export values. Use unique `par_name` for attribute access. For full code, see TrapCode.py.

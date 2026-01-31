@@ -32,3 +32,11 @@ C:\Program Files\Image-Line\FL Studio 2025\Shared\Python\Lib\
 ```
 
 CWD: `/Applications/FL Studio 2025.app/Contents/Resources/FL`
+
+## VFX Script Gotchas
+
+### Voice Release Timing
+`vfx.context.ticks` only advances during playback. For reliable note release regardless of transport state, set `voice.length` before triggering — FL's audio engine handles the release internally.
+
+### Voice Velocity Range
+`voice.velocity` expects **0-1 normalized**, not MIDI 0-127. Divide by 127 when converting from MIDI velocity.

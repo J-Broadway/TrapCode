@@ -540,5 +540,118 @@ def surface(name):
     return _surface_cache[name]
 
 
+# -----------------------------
+# Voice Triggering (Phase 1)
+# -----------------------------
+
+# Module-level state
+_trigger_queue = []      # Pending TriggerState objects
+_active_voices = []      # (voice, release_tick) tuples
+_update_called = False   # For reminder message
+_reminder_shown = False  # One-time reminder flag
+
+
+def beats_to_ticks(beats):
+    """Convert beats to ticks. 1 beat = 1 quarter note."""
+    return beats * vfx.context.PPQ
+
+
+class TriggerState:
+    """Tracks a pending or active trigger."""
+    def __init__(self, source, note_length):
+        self.source = source           # Note instance
+        self.note_length = note_length # Length in beats
+        self.pending = True            # Waiting to fire
+
+
+class Note:
+    """
+    Programmatic note for triggering voices.
+    
+    Args:
+        m: MIDI note number (0-127)
+        v: Velocity (0-127), default 100
+        l: Length in beats, default 1 (quarter note)
+    """
+    def __init__(self, m, v=100, l=1):
+        self.m = _clamp(m, 0, 127)
+        self.v = _clamp(v, 0, 127)
+        self.l = l
+        self._voices = []  # Active voices for this Note
+    
+    def trigger(self, l=None, cut=True):
+        """
+        Queue a one-shot trigger.
+        
+        Args:
+            l: Optional length override in beats
+            cut: If True (default), release previous voices before triggering
+        
+        Returns:
+            self for chaining
+        """
+        # Cut previous voices if requested
+        if cut:
+            for voice in self._voices:
+                voice.release()
+            self._voices.clear()
+        
+        length = l if l is not None else self.l
+        state = TriggerState(source=self, note_length=length)
+        _trigger_queue.append(state)
+        _check_update_reminder()
+        return self
+
+
+def _check_update_reminder():
+    """Show one-time reminder if update() hasn't been called yet."""
+    global _reminder_shown
+    if not _update_called and not _reminder_shown:
+        print("[TrapCode] Reminder: Call tc.update() in onTick() for triggers to fire")
+        _reminder_shown = True
+
+
+def _fire_note(state, current_tick):
+    """Create and trigger a voice from a TriggerState."""
+    voice = vfx.Voice()
+    voice.note = state.source.m
+    voice.velocity = state.source.v / 127.0  # Normalize MIDI 0-127 to 0-1
+    voice.length = int(beats_to_ticks(state.note_length))  # FL auto-releases after this
+    voice.trigger()
+    
+    # Track on Note instance for cut behavior
+    state.source._voices.append(voice)
+    
+    # Track globally for cleanup
+    release_tick = current_tick + beats_to_ticks(state.note_length)
+    _active_voices.append((state.source, voice, release_tick))
+
+
+def update():
+    """
+    Process triggers and releases. Call in onTick().
+    
+    Fires any pending triggers. Voices auto-release via v.length.
+    """
+    global _update_called
+    _update_called = True
+    current_tick = vfx.context.ticks
+    
+    # Fire pending triggers
+    for state in _trigger_queue[:]:
+        if state.pending:
+            _fire_note(state, current_tick)
+            state.pending = False
+            _trigger_queue.remove(state)
+    
+    # Clean up expired voice tracking (FL auto-releases via v.length)
+    for source, voice, release_tick in _active_voices[:]:
+        if current_tick >= int(release_tick):
+            # Remove from Note's voice list
+            if voice in source._voices:
+                source._voices.remove(voice)
+            _active_voices.remove((source, voice, release_tick))
+
+
 # Initialization message
 print("[TrapCode] Initialized")
