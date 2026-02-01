@@ -562,8 +562,26 @@ def surface(name):
 # Module-level state
 _trigger_queue = []      # Pending TriggerState objects
 _active_voices = []      # (voice, release_tick) tuples
+_voice_parents = {}      # voice -> parent voice mapping (for programmatic notes)
 _update_called = False   # For reminder message
 _reminder_shown = False  # One-time reminder flag
+
+
+def get_parent(voice):
+    """
+    Get the parent voice for a given voice.
+    
+    Works with both:
+    - MIDI class instances (have .parentVoice attribute)
+    - Programmatic notes created with parent= parameter
+    
+    Returns None if no parent (ghost notes).
+    """
+    # Check MIDI class instances first
+    if hasattr(voice, 'parentVoice'):
+        return voice.parentVoice
+    # Check programmatic note tracking
+    return _voice_parents.get(voice)
 
 
 def beats_to_ticks(beats):
@@ -573,9 +591,10 @@ def beats_to_ticks(beats):
 
 class TriggerState:
     """Tracks a pending or active trigger."""
-    def __init__(self, source, note_length):
+    def __init__(self, source, note_length, parent=None):
         self.source = source           # Note instance
         self.note_length = note_length # Length in beats
+        self.parent = parent           # Optional parent voice (for MIDI-tied notes)
         self.pending = True            # Waiting to fire
 
 
@@ -704,13 +723,14 @@ class Note:
     @fp.setter
     def fp(self, val): self.finePitch = val
     
-    def trigger(self, l=None, cut=True):
+    def trigger(self, l=None, cut=True, parent=None):
         """
         Queue a one-shot trigger.
         
         Args:
             l: Optional length override in beats
             cut: If True (default), release previous voices before triggering
+            parent: Optional parent voice (ties note to incoming MIDI for release)
         
         Returns:
             self for chaining
@@ -722,7 +742,7 @@ class Note:
             self._voices.clear()
         
         length = l if l is not None else self.l
-        state = TriggerState(source=self, note_length=length)
+        state = TriggerState(source=self, note_length=length, parent=parent)
         _trigger_queue.append(state)
         _check_update_reminder()
         return self
@@ -740,6 +760,9 @@ def _fire_note(state, current_tick):
     """Create and trigger a voice from a TriggerState."""
     src = state.source
     voice = vfx.Voice()
+    # Track parent relationship (if any) in module dict
+    if state.parent is not None:
+        _voice_parents[voice] = state.parent
     voice.note = src.m
     voice.velocity = src.v / 127.0  # Normalize MIDI 0-127 to 0-1
     voice.length = int(beats_to_ticks(state.note_length))  # FL auto-releases after this
@@ -781,6 +804,8 @@ def update():
             # Remove from Note's voice list
             if voice in source._voices:
                 source._voices.remove(voice)
+            # Clean up parent tracking
+            _voice_parents.pop(voice, None)
             _active_voices.remove((source, voice, release_tick))
 
 

@@ -454,6 +454,24 @@ myNote.trigger()            # cut=True (default), releases previous
 myNote.trigger(cut=False)   # Allow overlapping voices
 ```
 
+**Parent voice** (optional): Tie programmatic notes to incoming MIDI for synchronized release:
+
+```python
+def onTriggerVoice(incomingVoice):
+    # Arpeggio notes tied to incoming MIDI
+    arp = tc.Note(m=incomingVoice.note + 12)
+    arp.trigger(parent=incomingVoice)  # Releases when parent releases
+
+def onReleaseVoice(incomingVoice):
+    for v in vfx.context.voices:
+        if tc.get_parent(v) == incomingVoice:
+            v.release()
+```
+
+`tc.get_parent(voice)` returns the parent voice (or `None` for ghost notes). Works with both `tc.MIDI` instances and programmatic notes created with `parent=`.
+
+Without `parent`, notes are "ghost notes" that release based on their length only.
+
 #### Helper Function
 `tc.beats_to_ticks(beats)`: Convert beats to ticks for advanced timing.
 
