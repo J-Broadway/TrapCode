@@ -383,16 +383,29 @@ print(tc.groups())  # e.g., ['Settings', 'test']
 Programmatic MIDI note creation with beat-relative timing.
 
 #### Note Class
-Create notes with MIDI number, velocity, and length in beats.
+Create notes with MIDI number, velocity, length, and optional voice properties.
 
 ```python
 myNote = tc.Note(m=72, v=100, l=1)  # C5, velocity 100, 1 beat (quarter note)
+myNote = tc.Note(midi=60, velocity=80, length=2, p=-0.5)  # Using aliases
 ```
 
-Parameters:
-- `m`: MIDI note number (0-127), required
-- `v`: Velocity (0-127), default 100
-- `l`: Length in beats, default 1 (quarter note)
+Parameters (aliases in parentheses):
+- `m` (`midi`): MIDI note number (0-127), default 60
+- `v` (`velocity`): Velocity (0-127), default 100
+- `l` (`length`): Length in beats, default 1 (quarter note)
+- `pan` (`p`): Stereo pan (-1 left, 0 center, 1 right), default 0
+- `output` (`o`): Voice output port in Patcher (0-based), default 0
+- `fcut` (`fc`, `x`): Mod X / filter cutoff (-1 to 1), default 0
+- `fres` (`fr`, `y`): Mod Y / filter resonance (-1 to 1), default 0
+- `finePitch` (`fp`): Microtonal pitch offset (fractional notes), default 0
+
+All aliases work both in constructor and as attributes:
+```python
+myNote = tc.Note(midi=72, velocity=100)
+myNote.midi = 60      # Same as myNote.m = 60
+myNote.x = 0.5        # Same as myNote.fcut = 0.5
+```
 
 Beat values:
 | Value | Duration |

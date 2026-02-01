@@ -19,49 +19,6 @@ def _warn_clamp(name, value, lo, hi):
         where = f" (line {caller.lineno})" if caller else ""
         print(f"[TrapCode]{where} '{name}' value {value} outside [{lo}, {hi}] -> clamped")
 
-def _recover_value(name, default, value_type=float, min_val=None, max_val=None):
-    """
-    Try to recover previous UI value, fallback to default.
-    
-    Checks two sources:
-    1. Cached state on vfx module (persists across recompiles)
-    2. Old form context (if available)
-    
-    Args:
-        name: Control name to look up
-        default: Fallback value if recovery fails
-        value_type: Type to coerce (float, int, bool, str)
-        min_val/max_val: Optional range clamping
-    
-    Returns:
-        Previous value if found, otherwise default
-    """
-    # Try cached state first (persists on vfx module)
-    try:
-        if hasattr(vfx, '_tc_state') and name in vfx._tc_state:
-            prev = value_type(vfx._tc_state[name])
-            if min_val is not None and max_val is not None:
-                prev = _clamp(prev, min_val, max_val)
-            return prev
-    except:
-        pass
-    
-    # Try old form context
-    try:
-        prev = value_type(vfx.context.form.getInputValue(name))
-        if min_val is not None and max_val is not None:
-            prev = _clamp(prev, min_val, max_val)
-        return prev
-    except:
-        return default
-
-
-def _cache_value(name, value):
-    """Cache a control value on vfx module for persistence across recompiles."""
-    if not hasattr(vfx, '_tc_state'):
-        vfx._tc_state = {}
-    vfx._tc_state[name] = value
-
 # -----------------------------
 # Mixins
 # -----------------------------
@@ -355,7 +312,6 @@ class UI:
         _read_only_attrs = ['name', 'default', 'min', 'max', 'hint']
         def __init__(self, form, name='Knob', d=0, min=0, max=1, hint=''):
             self._form = form
-            d = _recover_value(name, d, float, min, max)
             object.__setattr__(self, 'name', name)
             object.__setattr__(self, 'default', d)
             object.__setattr__(self, 'min', min)
@@ -365,9 +321,7 @@ class UI:
         @property
         def val(self):
             try:
-                v = vfx.context.form.getInputValue(self.name)
-                _cache_value(self.name, v)
-                return v
+                return vfx.context.form.getInputValue(self.name)
             except AttributeError:
                 return self.default
         @val.setter
@@ -384,7 +338,6 @@ class UI:
         _read_only_attrs = ['name', 'default', 'min', 'max', 'hint']
         def __init__(self, form, name='KnobInt', d=0, min=0, max=1, hint=''):
             self._form = form
-            d = _recover_value(name, d, int, min, max)
             object.__setattr__(self, 'name', name)
             object.__setattr__(self, 'default', int(d))
             object.__setattr__(self, 'min', int(min))
@@ -394,9 +347,7 @@ class UI:
         @property
         def val(self):
             try:
-                v = int(vfx.context.form.getInputValue(self.name))
-                _cache_value(self.name, v)
-                return v
+                return int(vfx.context.form.getInputValue(self.name))
             except (AttributeError, TypeError, ValueError):
                 return int(self.default)
         @val.setter
@@ -415,7 +366,6 @@ class UI:
         _read_only_attrs = ['name', 'default', 'hint']
         def __init__(self, form, name='Checkbox', default=False, hint=''):
             self._form = form
-            default = _recover_value(name, default, bool)
             object.__setattr__(self, 'name', name)
             object.__setattr__(self, 'default', bool(default))
             object.__setattr__(self, 'hint', hint)
@@ -423,9 +373,7 @@ class UI:
         @property
         def val(self):
             try:
-                v = bool(vfx.context.form.getInputValue(self.name))
-                _cache_value(self.name, v)
-                return v
+                return bool(vfx.context.form.getInputValue(self.name))
             except AttributeError:
                 return bool(self.default)
         @val.setter
@@ -451,15 +399,13 @@ class UI:
                     raise ValueError(f"Default '{d}' not in options {options}")
             if not isinstance(d, int):
                 raise TypeError("Default must be int (index) or matching str")
-            d = _recover_value(name, d, int, 0, max(0, len(options) - 1))
+            d = _clamp(d, 0, max(0, len(options) - 1))
             object.__setattr__(self, 'default', d)
             form.addInputCombo(name, options, d, hint)
         @property
         def val(self):
             try:
-                v = int(vfx.context.form.getInputValue(self.name))
-                _cache_value(self.name, v)
-                return v
+                return int(vfx.context.form.getInputValue(self.name))
             except (AttributeError, TypeError, ValueError):
                 return int(self.default)
         @val.setter
@@ -482,16 +428,13 @@ class UI:
         _read_only_attrs = ['name', 'default']
         def __init__(self, form, name='Text', default=''):
             self._form = form
-            default = _recover_value(name, default, str)
             object.__setattr__(self, 'name', name)
             object.__setattr__(self, 'default', default)
             form.addInputText(name, default)
         @property
         def val(self):
             try:
-                v = vfx.context.form.getInputValue(self.name)
-                _cache_value(self.name, v)
-                return v
+                return vfx.context.form.getInputValue(self.name)
             except AttributeError:
                 return self.default
         @val.setter
@@ -636,20 +579,130 @@ class TriggerState:
         self.pending = True            # Waiting to fire
 
 
+# Alias mapping for Note parameters (alias -> canonical name)
+_NOTE_ALIASES = {
+    # MIDI note number
+    'm': 'm', 'midi': 'm',
+    # Velocity
+    'v': 'v', 'velocity': 'v',
+    # Length
+    'l': 'l', 'length': 'l',
+    # Pan
+    'pan': 'pan', 'p': 'pan',
+    # Output port
+    'output': 'output', 'o': 'output',
+    # Filter cutoff / Mod X
+    'fcut': 'fcut', 'fc': 'fcut', 'x': 'fcut',
+    # Filter resonance / Mod Y
+    'fres': 'fres', 'fr': 'fres', 'y': 'fres',
+    # Fine pitch
+    'finePitch': 'finePitch', 'fp': 'finePitch',
+}
+
+# Default values for Note parameters
+_NOTE_DEFAULTS = {
+    'm': 60, 'v': 100, 'l': 1, 'pan': 0,
+    'output': 0, 'fcut': 0, 'fres': 0, 'finePitch': 0,
+}
+
+
+def _resolve_note_kwargs(kwargs):
+    """Resolve aliased kwargs to canonical parameter names."""
+    resolved = {}
+    for key, value in kwargs.items():
+        canonical = _NOTE_ALIASES.get(key)
+        if canonical is None:
+            raise TypeError(f"Note() got unexpected keyword argument '{key}'")
+        if canonical in resolved:
+            raise TypeError(f"Note() got multiple values for parameter '{canonical}'")
+        resolved[canonical] = value
+    return resolved
+
+
 class Note:
     """
     Programmatic note for triggering voices.
     
-    Args:
-        m: MIDI note number (0-127)
-        v: Velocity (0-127), default 100
-        l: Length in beats, default 1 (quarter note)
+    Args (aliases in parentheses):
+        m (midi): MIDI note number (0-127)
+        v (velocity): Velocity (0-127), default 100
+        l (length): Length in beats, default 1 (quarter note)
+        pan (p): Stereo pan (-1 left, 0 center, 1 right), default 0
+        output (o): Voice output port (0-based), default 0
+        fcut (fc, x): Mod X / filter cutoff (-1 to 1), default 0
+        fres (fr, y): Mod Y / filter resonance (-1 to 1), default 0
+        finePitch (fp): Microtonal pitch offset (fractional notes), default 0
     """
-    def __init__(self, m, v=100, l=1):
-        self.m = _clamp(m, 0, 127)
-        self.v = _clamp(v, 0, 127)
-        self.l = l
+    def __init__(self, **kwargs):
+        # Resolve aliases to canonical names
+        params = _resolve_note_kwargs(kwargs)
+        
+        # Apply defaults for missing params
+        for key, default in _NOTE_DEFAULTS.items():
+            if key not in params:
+                params[key] = default
+        
+        # Set canonical attributes with validation
+        self.m = _clamp(params['m'], 0, 127)
+        self.v = _clamp(params['v'], 0, 127)
+        self.l = params['l']
+        self.pan = _clamp(params['pan'], -1, 1)
+        self.output = int(params['output'])
+        self.fcut = _clamp(params['fcut'], -1, 1)
+        self.fres = _clamp(params['fres'], -1, 1)
+        self.finePitch = params['finePitch']
         self._voices = []  # Active voices for this Note
+    
+    # Property aliases for attribute access
+    @property
+    def midi(self): return self.m
+    @midi.setter
+    def midi(self, val): self.m = _clamp(val, 0, 127)
+    
+    @property
+    def velocity(self): return self.v
+    @velocity.setter
+    def velocity(self, val): self.v = _clamp(val, 0, 127)
+    
+    @property
+    def length(self): return self.l
+    @length.setter
+    def length(self, val): self.l = val
+    
+    @property
+    def p(self): return self.pan
+    @p.setter
+    def p(self, val): self.pan = _clamp(val, -1, 1)
+    
+    @property
+    def o(self): return self.output
+    @o.setter
+    def o(self, val): self.output = int(val)
+    
+    @property
+    def fc(self): return self.fcut
+    @fc.setter
+    def fc(self, val): self.fcut = _clamp(val, -1, 1)
+    
+    @property
+    def x(self): return self.fcut
+    @x.setter
+    def x(self, val): self.fcut = _clamp(val, -1, 1)
+    
+    @property
+    def fr(self): return self.fres
+    @fr.setter
+    def fr(self, val): self.fres = _clamp(val, -1, 1)
+    
+    @property
+    def y(self): return self.fres
+    @y.setter
+    def y(self, val): self.fres = _clamp(val, -1, 1)
+    
+    @property
+    def fp(self): return self.finePitch
+    @fp.setter
+    def fp(self, val): self.finePitch = val
     
     def trigger(self, l=None, cut=True):
         """
@@ -685,10 +738,16 @@ def _check_update_reminder():
 
 def _fire_note(state, current_tick):
     """Create and trigger a voice from a TriggerState."""
+    src = state.source
     voice = vfx.Voice()
-    voice.note = state.source.m
-    voice.velocity = state.source.v / 127.0  # Normalize MIDI 0-127 to 0-1
+    voice.note = src.m
+    voice.velocity = src.v / 127.0  # Normalize MIDI 0-127 to 0-1
     voice.length = int(beats_to_ticks(state.note_length))  # FL auto-releases after this
+    voice.pan = src.pan
+    voice.output = src.output
+    voice.fcut = src.fcut
+    voice.fres = src.fres
+    voice.finePitch = src.finePitch
     voice.trigger()
     
     # Track on Note instance for cut behavior
