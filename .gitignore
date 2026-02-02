@@ -1,9 +1,7 @@
-# Dev-only directories (tracked in dev branch)
-.cursor/
-scope/
-
 # Python
 __pycache__/
 *.pyc
 *.pyo
+
+# Strudel experiments (not part of TrapCode)
 scope/strudel/

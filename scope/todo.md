@@ -1,0 +1,1 @@
+- Consolodate tc.exports.update() into tc.update() to reduce boilerplate
