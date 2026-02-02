@@ -1,16 +1,19 @@
-# TrapCode boilerplate
 import flvfx as vfx
 import trapcode as tc
 
+tc.debug(True, level=1)
+
 def createDialog():
     ui = tc.UI()
-    # Add controls here
-    # ui.Knob(name='MyKnob', d=0.5, min=0, max=1)
+    # Cycle beats: 0.1 = very fast (riser peak), 4 = normal quarter notes
+    ui.Knob(name='Cycle', d=2, min=0.1, max=4, export='bind')
     return ui.form
 
 def onTriggerVoice(incomingVoice):
     midi = tc.MIDI(incomingVoice)
-    midi.n("0 1 2 3")
+
+    # Pass the wrapper directly (not .val) for dynamic updates
+    midi.n("0 3 5 7", c=tc.par.Cycle)
     #midi.trigger()
 
 def onReleaseVoice(incomingVoice):

@@ -1081,6 +1081,11 @@ class Pattern:
         self._query_fn = query_fn
         self._running = False
         self._start_tick = 0
+        # Phase tracking for cycle-latched updates
+        self._phase = Fraction(0)      # Current position in cycle-time (0.0 to ∞)
+        self._last_tick = None         # Last tick we processed
+        self._latched_cycle_beats = None  # Cycle beats latched at cycle start
+        self._pending_cycle_beats = None  # Next cycle beats (applied at cycle boundary)
     
     def query(self, arc: Arc) -> List[Event]:
         """Query events within the given time arc."""
@@ -1154,6 +1159,10 @@ class Pattern:
         """Start the pattern. Optionally provide current tick, else uses 0."""
         self._running = True
         self._start_tick = current_tick if current_tick is not None else 0
+        self._phase = Fraction(0)
+        self._last_tick = current_tick
+        self._latched_cycle_beats = None  # Will be set on first tick()
+        self._pending_cycle_beats = None
         return self
     
     def stop(self):
@@ -1164,16 +1173,25 @@ class Pattern:
     def reset(self, current_tick: int = None):
         """Reset and restart the pattern."""
         self._start_tick = current_tick if current_tick is not None else 0
+        self._phase = Fraction(0)
+        self._last_tick = current_tick
+        self._latched_cycle_beats = None
+        self._pending_cycle_beats = None
         return self
     
-    def tick(self, current_tick: int, ppq: int, cycle_beats: int = 4) -> List[Event]:
+    def tick(self, current_tick: int, ppq: int, cycle_beats = 4) -> List[Event]:
         """
         Query events that should fire on this tick.
+        
+        Uses cycle-latched timing: cycle_beats changes only take effect at the
+        start of each cycle. This prevents glitchy artifacts when automating
+        the cycle parameter.
         
         Args:
             current_tick: Current FL Studio tick count
             ppq: Pulses per quarter note
-            cycle_beats: Beats per cycle (default 4 = one bar in 4/4)
+            cycle_beats: Beats per cycle (default 4 = one bar in 4/4).
+                         Changes are latched and applied at cycle boundaries.
         
         Returns:
             List of events with onset in this tick window (rests excluded)
@@ -1181,14 +1199,49 @@ class Pattern:
         if not self._running:
             return []
         
-        # Relative tick since pattern started
-        rel_tick = current_tick - self._start_tick
-        if rel_tick < 0:
-            return []
+        # Clamp incoming cycle_beats to minimum
+        cycle_beats = float(cycle_beats)
+        if cycle_beats < 0.01:
+            cycle_beats = 0.01
         
-        # Convert to 1-tick-wide arc in cycle time
-        arc = _tick_arc(rel_tick, ppq, cycle_beats)
-        events = self.query(arc)
+        # Handle first tick: latch initial cycle_beats
+        if self._last_tick is None:
+            self._last_tick = current_tick
+            self._phase = Fraction(0)
+            self._latched_cycle_beats = cycle_beats
+            self._pending_cycle_beats = cycle_beats
+        
+        # Store pending value for next cycle boundary
+        self._pending_cycle_beats = cycle_beats
+        
+        # Use latched value for this cycle (fallback to incoming if not yet latched)
+        active_cycle_beats = self._latched_cycle_beats if self._latched_cycle_beats is not None else cycle_beats
+        
+        # Calculate phase increment using latched cycle_beats
+        ticks_per_cycle = ppq * active_cycle_beats
+        phase_increment = Fraction(1, int(ticks_per_cycle))
+        
+        # Check for cycle boundary BEFORE advancing phase
+        phase_before = self._phase
+        cycle_before = int(phase_before)
+        
+        # Advance phase
+        ticks_elapsed = current_tick - self._last_tick
+        if ticks_elapsed > 0:
+            self._phase = self._phase + phase_increment * ticks_elapsed
+            self._last_tick = current_tick
+        
+        # Check if we crossed a cycle boundary
+        cycle_after = int(self._phase)
+        if cycle_after > cycle_before:
+            # Crossed into new cycle - latch the pending cycle_beats
+            self._latched_cycle_beats = self._pending_cycle_beats
+        
+        # Query 1-phase-increment-wide arc at current phase
+        arc_start = self._phase
+        arc_end = self._phase + phase_increment
+        
+        events = self.query((arc_start, arc_end))
         
         # Only fire events where onset falls in this window, skip rests
         return [e for e in events if e.has_onset() and e.value is not None]
@@ -1417,25 +1470,34 @@ def _update_patterns():
     current_tick = _get_current_tick()
     
     for pattern, root_raw, cycle_beats_raw in _active_patterns[:]:
-        # Resolve dynamic parameters each tick
+        # Resolve dynamic parameters each tick (allow fractional for smooth control)
         root = _resolve_dynamic(root_raw)
         cycle_beats = _resolve_dynamic(cycle_beats_raw)
         try:
-            cycle_beats = max(1, int(cycle_beats))
+            cycle_beats = float(cycle_beats)
+            if cycle_beats <= 0:
+                cycle_beats = 0.01  # Minimum: very fast
         except (TypeError, ValueError):
             cycle_beats = 4
         
         events = pattern.tick(current_tick, ppq, cycle_beats)
+        
+        # Use the latched cycle_beats for duration calculation
+        active_cycle_beats = pattern._latched_cycle_beats or cycle_beats
+        
         for e in events:
             # Create and trigger note
             note_val = root + e.value if e.value is not None else None
             if note_val is not None:
-                # Calculate duration from event's whole span
+                # Calculate duration from event's whole span (use latched value)
                 if e.whole:
                     duration_time = e.whole[1] - e.whole[0]
-                    duration_beats = float(duration_time) * cycle_beats
+                    duration_beats = float(duration_time) * active_cycle_beats
                 else:
-                    duration_beats = 1  # Default to 1 beat
+                    duration_beats = 0.1  # Short default for fast patterns
+                
+                # Clamp minimum duration
+                duration_beats = max(0.01, duration_beats)
                 
                 note = Note(m=int(note_val), l=duration_beats)
                 note.trigger(cut=False)
@@ -1543,10 +1605,12 @@ def _update_midi_patterns():
     for voice_id in list(_midi_patterns.keys()):
         pat, cycle_beats_raw, root, midi_wrapper = _midi_patterns[voice_id]
         
-        # Resolve dynamic cycle_beats each tick
+        # Resolve dynamic cycle_beats each tick (allow fractional for smooth control)
         cycle_beats = _resolve_dynamic(cycle_beats_raw)
         try:
-            cycle_beats = max(1, int(cycle_beats))  # Ensure positive integer
+            cycle_beats = float(cycle_beats)
+            if cycle_beats <= 0:
+                cycle_beats = 0.01  # Minimum: very fast (100x per beat)
         except (TypeError, ValueError):
             cycle_beats = 4  # Fallback to default
         
@@ -1555,16 +1619,15 @@ def _update_midi_patterns():
             del _midi_patterns[voice_id]
             continue
         
-        # Debug: show timing info
-        rel_tick = current_tick - pat._start_tick
-        ticks_per_cycle = ppq * cycle_beats
-        arc_start = Fraction(rel_tick, ticks_per_cycle)
-        arc_end = Fraction(rel_tick + 1, ticks_per_cycle)
+        # Debug: show timing info (using pattern's internal phase and latched cycle)
+        latched_c = pat._latched_cycle_beats or cycle_beats
+        _log("patterns", f"tick={current_tick} phase={float(pat._phase):.4f} c={cycle_beats:.3f} latched_c={latched_c:.3f}", level=2)
         
-        _log("patterns", f"tick={current_tick} rel={rel_tick} start_tick={pat._start_tick} arc=({float(arc_start):.4f}, {float(arc_end):.4f}) c={cycle_beats}", level=2)
-        
-        # Process events
+        # Process events (pattern.tick() uses cycle-latched timing)
         events = pat.tick(current_tick, ppq, cycle_beats)
+        
+        # Use the latched cycle_beats for duration calculation (consistent within cycle)
+        active_cycle_beats = pat._latched_cycle_beats or cycle_beats
         
         for e in events:
             _log("patterns", f"EVENT value={e.value} whole=({float(e.whole[0]):.4f}, {float(e.whole[1]):.4f}) part=({float(e.part[0]):.4f}, {float(e.part[1]):.4f}) has_onset={e.has_onset()}", level=2)
@@ -1572,14 +1635,17 @@ def _update_midi_patterns():
         for e in events:
             note_val = root + e.value if e.value is not None else None
             if note_val is not None:
-                # Calculate duration from event's whole span
+                # Calculate duration from event's whole span (use latched cycle_beats)
                 if e.whole:
                     duration_time = e.whole[1] - e.whole[0]
-                    duration_beats = float(duration_time) * cycle_beats
+                    duration_beats = float(duration_time) * active_cycle_beats
                 else:
-                    duration_beats = 1
+                    duration_beats = 0.1  # Short default for fast patterns
                 
-                _log("patterns", f"TRIGGER note={note_val} duration={duration_beats} beats", level=1)
+                # Clamp minimum duration to avoid zero-length notes
+                duration_beats = max(0.01, duration_beats)
+                
+                _log("patterns", f"TRIGGER note={note_val} duration={duration_beats:.3f} beats", level=1)
                 
                 note_obj = Note(m=int(note_val), l=duration_beats)
                 note_obj.trigger(cut=False, parent=midi_wrapper.parentVoice)
