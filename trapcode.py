@@ -565,6 +565,7 @@ _active_voices = []      # (voice, release_tick) tuples
 _voice_parents = {}      # voice -> parent voice mapping (for programmatic notes)
 _update_called = False   # For reminder message
 _reminder_shown = False  # One-time reminder flag
+_internal_tick = 0       # Internal tick counter (increments each update() call)
 
 
 def get_parent(voice):
@@ -781,15 +782,24 @@ def _fire_note(state, current_tick):
     _active_voices.append((state.source, voice, release_tick))
 
 
-def update():
+def _get_current_tick():
+    """Get the current tick for pattern timing.
+    
+    Uses internal tick counter which increments each update() call.
+    This ensures patterns advance even when FL Studio is stopped.
     """
-    Process triggers and releases. Call in onTick().
+    return _internal_tick
+
+
+def _base_update():
+    """
+    Process triggers and releases (internal). Called by update().
     
     Fires any pending triggers. Voices auto-release via v.length.
     """
     global _update_called
     _update_called = True
-    current_tick = vfx.context.ticks
+    current_tick = _internal_tick
     
     # Fire pending triggers
     for state in _trigger_queue[:]:
@@ -807,6 +817,732 @@ def update():
             # Clean up parent tracking
             _voice_parents.pop(voice, None)
             _active_voices.remove((source, voice, release_tick))
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                         PATTERN ENGINE (Strudel)                          ║
+# ║  Mini-notation parser and temporal pattern system inspired by Strudel/    ║
+# ║  TidalCycles. See: https://strudel.cc                                     ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+# Minimal Fraction implementation to avoid FL Studio crash on recompile.
+# The standard library's fractions module triggers _decimal C extension loading,
+# which corrupts memory when VFX Script reinitializes the Python interpreter.
+from math import gcd as _gcd
+
+class Fraction:
+    """Minimal rational number for pattern timing. Avoids stdlib fractions/decimal."""
+    __slots__ = ('_n', '_d')
+    
+    def __init__(self, numerator=0, denominator=1):
+        if isinstance(numerator, Fraction):
+            self._n, self._d = numerator._n, numerator._d
+            return
+        if isinstance(numerator, float):
+            # Convert float to fraction (limited precision)
+            if numerator == int(numerator):
+                numerator = int(numerator)
+            else:
+                # Use 1000000 as denominator for float conversion
+                self._n, self._d = int(numerator * 1000000), 1000000
+                self._reduce()
+                return
+        if isinstance(numerator, str):
+            if '/' in numerator:
+                n, d = numerator.split('/')
+                numerator, denominator = int(n), int(d)
+            else:
+                numerator = int(float(numerator))
+        n, d = int(numerator), int(denominator)
+        if d == 0:
+            raise ZeroDivisionError("Fraction denominator cannot be zero")
+        if d < 0:
+            n, d = -n, -d
+        g = _gcd(abs(n), d) if n else 1
+        self._n, self._d = n // g, d // g
+    
+    def _reduce(self):
+        g = _gcd(abs(self._n), self._d) if self._n else 1
+        self._n, self._d = self._n // g, self._d // g
+    
+    @property
+    def numerator(self): return self._n
+    @property
+    def denominator(self): return self._d
+    
+    def __repr__(self): return f"Fraction({self._n}, {self._d})"
+    def __str__(self): return f"{self._n}/{self._d}" if self._d != 1 else str(self._n)
+    def __float__(self): return self._n / self._d
+    def __int__(self): return int(self._n // self._d)
+    def __hash__(self): return hash((self._n, self._d))
+    
+    def __eq__(self, other):
+        if isinstance(other, Fraction): return self._n * other._d == other._n * self._d
+        if isinstance(other, (int, float)): return float(self) == float(other)
+        return NotImplemented
+    def __lt__(self, other):
+        if isinstance(other, Fraction): return self._n * other._d < other._n * self._d
+        if isinstance(other, (int, float)): return float(self) < float(other)
+        return NotImplemented
+    def __le__(self, other): return self == other or self < other
+    def __gt__(self, other):
+        if isinstance(other, Fraction): return self._n * other._d > other._n * self._d
+        if isinstance(other, (int, float)): return float(self) > float(other)
+        return NotImplemented
+    def __ge__(self, other): return self == other or self > other
+    
+    def __add__(self, other):
+        if isinstance(other, int): other = Fraction(other)
+        elif isinstance(other, float): other = Fraction(other)
+        if isinstance(other, Fraction):
+            return Fraction(self._n * other._d + other._n * self._d, self._d * other._d)
+        return NotImplemented
+    def __radd__(self, other): return self.__add__(other)
+    
+    def __sub__(self, other):
+        if isinstance(other, int): other = Fraction(other)
+        elif isinstance(other, float): other = Fraction(other)
+        if isinstance(other, Fraction):
+            return Fraction(self._n * other._d - other._n * self._d, self._d * other._d)
+        return NotImplemented
+    def __rsub__(self, other): return Fraction(other).__sub__(self)
+    
+    def __mul__(self, other):
+        if isinstance(other, int): other = Fraction(other)
+        elif isinstance(other, float): other = Fraction(other)
+        if isinstance(other, Fraction):
+            return Fraction(self._n * other._n, self._d * other._d)
+        return NotImplemented
+    def __rmul__(self, other): return self.__mul__(other)
+    
+    def __truediv__(self, other):
+        if isinstance(other, int): other = Fraction(other)
+        elif isinstance(other, float): other = Fraction(other)
+        if isinstance(other, Fraction):
+            return Fraction(self._n * other._d, self._d * other._n)
+        return NotImplemented
+    def __rtruediv__(self, other): return Fraction(other).__truediv__(self)
+    
+    def __neg__(self): return Fraction(-self._n, self._d)
+    def __pos__(self): return Fraction(self._n, self._d)
+    def __abs__(self): return Fraction(abs(self._n), self._d)
+
+from dataclasses import dataclass
+from typing import NamedTuple, Iterator, Optional, Any, Callable, List, Tuple
+
+# -----------------------------
+# Type Aliases
+# -----------------------------
+Time = Fraction
+Arc = Tuple[Time, Time]
+
+# -----------------------------
+# Event (Hap)
+# -----------------------------
+@dataclass
+class Event:
+    """
+    A musical event with temporal context.
+    
+    Attributes:
+        value: The musical value (MIDI note number, or None for rest)
+        whole: The original metric span (logical event duration)
+        part: The actual active time window (intersection with query arc)
+    """
+    value: Any
+    whole: Optional[Arc]
+    part: Arc
+    
+    def has_onset(self) -> bool:
+        """
+        Returns True if this event's onset is within the query arc.
+        
+        Critical for VFX Script: only trigger notes when has_onset() is True,
+        otherwise you'll fire the same note multiple times across tick boundaries.
+        """
+        return self.whole is not None and self.whole[0] == self.part[0]
+
+
+# -----------------------------
+# Time Conversion
+# -----------------------------
+def _ticks_to_time(ticks: int, ppq: int, cycle_beats: int) -> Time:
+    """Convert FL Studio ticks to cycle time (Fraction)."""
+    ticks_per_cycle = ppq * cycle_beats
+    return Fraction(ticks, ticks_per_cycle)
+
+
+def _time_to_ticks(t: Time, ppq: int, cycle_beats: int) -> int:
+    """Convert cycle time to FL Studio ticks."""
+    ticks_per_cycle = ppq * cycle_beats
+    return int(t * ticks_per_cycle)
+
+
+def _tick_arc(tick: int, ppq: int, cycle_beats: int) -> Arc:
+    """Return a 1-tick-wide query arc for the given tick."""
+    ticks_per_cycle = ppq * cycle_beats
+    return (Fraction(tick, ticks_per_cycle), Fraction(tick + 1, ticks_per_cycle))
+
+
+# -----------------------------
+# Tokenizer
+# -----------------------------
+class Token(NamedTuple):
+    type: str
+    value: str
+    pos: int
+
+
+_TOKEN_SPEC = [
+    ('NUMBER',  r'-?\d+(\.\d+)?'),  # Negative or positive, optional decimal
+    ('REST',    r'[~\-]'),          # ~ or standalone - (only matches if NUMBER didn't)
+    ('LBRACK',  r'\['),
+    ('RBRACK',  r'\]'),
+    ('LANGLE',  r'<'),
+    ('RANGLE',  r'>'),
+    ('STAR',    r'\*'),
+    ('SLASH',   r'/'),
+    ('WS',      r'\s+'),
+]
+
+_TOK_REGEX = '|'.join(f'(?P<{name}>{pattern})' for name, pattern in _TOKEN_SPEC)
+_IGNORE = {'WS'}
+
+
+def _tokenize(code: str) -> Iterator[Token]:
+    """Tokenize mini-notation string into tokens."""
+    for mo in re.finditer(_TOK_REGEX, code):
+        kind = mo.lastgroup
+        if kind not in _IGNORE:
+            yield Token(kind, mo.group(), mo.start())
+
+
+# -----------------------------
+# Pattern Class
+# -----------------------------
+class Pattern:
+    """
+    A temporal pattern that maps time arcs to events.
+    
+    Patterns are functions of time: query(arc) returns events within that arc.
+    """
+    def __init__(self, query_fn: Callable[[Arc], List[Event]]):
+        self._query_fn = query_fn
+        self._running = False
+        self._start_tick = 0
+    
+    def query(self, arc: Arc) -> List[Event]:
+        """Query events within the given time arc."""
+        return self._query_fn(arc)
+    
+    def __call__(self, arc: Arc) -> List[Event]:
+        """Alias for query()."""
+        return self.query(arc)
+    
+    @staticmethod
+    def pure(value) -> 'Pattern':
+        """
+        Constant pattern: value repeats every cycle.
+        
+        Handles multi-cycle queries correctly by returning one event per cycle.
+        """
+        def query(arc: Arc) -> List[Event]:
+            events = []
+            cycle_start = int(arc[0])
+            cycle_end = int(arc[1]) if arc[1] == int(arc[1]) else int(arc[1]) + 1
+            
+            for c in range(cycle_start, cycle_end):
+                whole = (Fraction(c), Fraction(c + 1))
+                part_start = max(arc[0], whole[0])
+                part_end = min(arc[1], whole[1])
+                if part_start < part_end:
+                    events.append(Event(value, whole, (part_start, part_end)))
+            return events
+        return Pattern(query)
+    
+    @staticmethod
+    def silence() -> 'Pattern':
+        """Empty pattern that produces no events."""
+        return Pattern(lambda arc: [])
+    
+    def fast(self, factor) -> 'Pattern':
+        """
+        Speed up pattern by factor. Used by * in mini notation.
+        
+        Compresses time: the pattern repeats `factor` times per cycle.
+        """
+        factor = Fraction(factor)
+        if factor == 0:
+            return Pattern.silence()
+        
+        def query(arc: Arc) -> List[Event]:
+            # Query inner pattern with compressed arc
+            inner_arc = (arc[0] * factor, arc[1] * factor)
+            events = self.query(inner_arc)
+            
+            # Transform both whole and part back to outer time
+            result = []
+            for e in events:
+                new_whole = (e.whole[0] / factor, e.whole[1] / factor) if e.whole else None
+                new_part = (e.part[0] / factor, e.part[1] / factor)
+                result.append(Event(e.value, new_whole, new_part))
+            return result
+        
+        return Pattern(query)
+    
+    def slow(self, factor) -> 'Pattern':
+        """
+        Slow down pattern by factor. Used by / in mini notation.
+        
+        Expands time: the pattern spans `factor` cycles.
+        """
+        return self.fast(Fraction(1) / Fraction(factor))
+    
+    # --- Playback control ---
+    def start(self, current_tick: int = None):
+        """Start the pattern. Optionally provide current tick, else uses 0."""
+        self._running = True
+        self._start_tick = current_tick if current_tick is not None else 0
+        return self
+    
+    def stop(self):
+        """Stop the pattern."""
+        self._running = False
+        return self
+    
+    def reset(self, current_tick: int = None):
+        """Reset and restart the pattern."""
+        self._start_tick = current_tick if current_tick is not None else 0
+        return self
+    
+    def tick(self, current_tick: int, ppq: int, cycle_beats: int = 4) -> List[Event]:
+        """
+        Query events that should fire on this tick.
+        
+        Args:
+            current_tick: Current FL Studio tick count
+            ppq: Pulses per quarter note
+            cycle_beats: Beats per cycle (default 4 = one bar in 4/4)
+        
+        Returns:
+            List of events with onset in this tick window (rests excluded)
+        """
+        if not self._running:
+            return []
+        
+        # Relative tick since pattern started
+        rel_tick = current_tick - self._start_tick
+        if rel_tick < 0:
+            return []
+        
+        # Convert to 1-tick-wide arc in cycle time
+        arc = _tick_arc(rel_tick, ppq, cycle_beats)
+        events = self.query(arc)
+        
+        # Only fire events where onset falls in this window, skip rests
+        return [e for e in events if e.has_onset() and e.value is not None]
+
+
+# -----------------------------
+# Pattern Combinators
+# -----------------------------
+def _sequence(*patterns) -> Pattern:
+    """
+    Concatenate patterns, each taking equal time within one cycle.
+    
+    This is the core subdivision operation. "a b c" means:
+    - a occupies 0 - 1/3
+    - b occupies 1/3 - 2/3  
+    - c occupies 2/3 - 1
+    """
+    n = len(patterns)
+    if n == 0:
+        return Pattern.silence()
+    if n == 1:
+        return patterns[0]
+    
+    def query(arc: Arc) -> List[Event]:
+        results = []
+        for i, pat in enumerate(patterns):
+            # This child occupies [i/n, (i+1)/n] of each cycle
+            child_start = Fraction(i, n)
+            child_end = Fraction(i + 1, n)
+            
+            # For each cycle the arc touches, check if it overlaps this child's slot
+            cycle_start = int(arc[0])
+            cycle_end = int(arc[1]) if arc[1] == int(arc[1]) else int(arc[1]) + 1
+            
+            for c in range(cycle_start, cycle_end):
+                # This child's absolute time slot in cycle c
+                slot_start = Fraction(c) + child_start
+                slot_end = Fraction(c) + child_end
+                
+                # Intersect with query arc
+                query_start = max(arc[0], slot_start)
+                query_end = min(arc[1], slot_end)
+                
+                if query_start < query_end:
+                    # Transform query to child's local time (0-1 within its slot)
+                    local_start = (query_start - slot_start) * n + Fraction(c)
+                    local_end = (query_end - slot_start) * n + Fraction(c)
+                    
+                    # Query child pattern
+                    child_events = pat.query((local_start, local_end))
+                    
+                    # Transform results back to parent time
+                    for e in child_events:
+                        new_whole = None
+                        if e.whole:
+                            w_start = slot_start + (e.whole[0] - Fraction(c)) / n
+                            w_end = slot_start + (e.whole[1] - Fraction(c)) / n
+                            new_whole = (w_start, w_end)
+                        p_start = slot_start + (e.part[0] - Fraction(c)) / n
+                        p_end = slot_start + (e.part[1] - Fraction(c)) / n
+                        new_part = (p_start, p_end)
+                        results.append(Event(e.value, new_whole, new_part))
+        
+        return results
+    
+    return Pattern(query)
+
+
+# Alias
+_fastcat = _sequence
+
+
+def _slowcat(*patterns) -> Pattern:
+    """
+    Cycle alternation: select one child per cycle based on cycle number.
+    
+    <a b c> plays a on cycle 0, b on cycle 1, c on cycle 2, a on cycle 3, etc.
+    """
+    n = len(patterns)
+    if n == 0:
+        return Pattern.silence()
+    if n == 1:
+        return patterns[0]
+    
+    def query(arc: Arc) -> List[Event]:
+        cycle_num = int(arc[0])  # floor of start time
+        pat_index = cycle_num % n
+        return patterns[pat_index].query(arc)
+    
+    return Pattern(query)
+
+
+# -----------------------------
+# Mini-Notation Parser
+# -----------------------------
+class _MiniParser:
+    """Recursive descent parser for mini-notation."""
+    
+    def __init__(self, tokens: List[Token]):
+        self.tokens = tokens
+        self.pos = 0
+    
+    def peek(self) -> Optional[Token]:
+        """Look at current token without consuming."""
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else None
+    
+    def consume(self, expected_type: str = None) -> Token:
+        """Consume and return current token."""
+        tok = self.peek()
+        if tok is None:
+            raise SyntaxError("Unexpected end of input")
+        if expected_type and tok.type != expected_type:
+            raise SyntaxError(f"Expected {expected_type}, got {tok.type} at position {tok.pos}")
+        self.pos += 1
+        return tok
+    
+    def parse(self) -> Pattern:
+        """Parse the full pattern."""
+        return self.parse_layer()
+    
+    def parse_layer(self) -> Pattern:
+        """
+        Parse a sequence of elements.
+        layer ::= element+
+        """
+        elements = []
+        while self.peek() and self.peek().type not in ('RBRACK', 'RANGLE'):
+            elements.append(self.parse_element())
+        
+        if not elements:
+            return Pattern.silence()
+        if len(elements) == 1:
+            return elements[0]
+        
+        return _sequence(*elements)
+    
+    def parse_element(self) -> Pattern:
+        """
+        Parse an atom with optional modifiers.
+        element ::= atom (modifier)*
+        """
+        pat = self.parse_atom()
+        
+        # Consume modifiers
+        while self.peek() and self.peek().type in ('STAR', 'SLASH'):
+            tok = self.consume()
+            # Next token must be a number
+            num_tok = self.consume('NUMBER')
+            num = Fraction(num_tok.value)
+            
+            if tok.type == 'STAR':
+                pat = pat.fast(num)
+            elif tok.type == 'SLASH':
+                pat = pat.slow(num)
+        
+        return pat
+    
+    def parse_atom(self) -> Pattern:
+        """
+        Parse a primitive value or grouped pattern.
+        atom ::= NUMBER | REST | '[' pattern ']' | '<' pattern+ '>'
+        """
+        tok = self.peek()
+        if tok is None:
+            return Pattern.silence()
+        
+        if tok.type == 'NUMBER':
+            self.consume()
+            # Parse as int if possible, else float
+            if '.' in tok.value:
+                return Pattern.pure(float(tok.value))
+            else:
+                return Pattern.pure(int(tok.value))
+        
+        elif tok.type == 'REST':
+            self.consume()
+            return Pattern.pure(None)  # Rest
+        
+        elif tok.type == 'LBRACK':
+            # Subdivision: [a b c]
+            self.consume('LBRACK')
+            inner = self.parse_layer()
+            self.consume('RBRACK')
+            return inner
+        
+        elif tok.type == 'LANGLE':
+            # Alternation: <a b c>
+            self.consume('LANGLE')
+            alternatives = []
+            while self.peek() and self.peek().type != 'RANGLE':
+                alternatives.append(self.parse_element())
+            self.consume('RANGLE')
+            
+            if not alternatives:
+                return Pattern.silence()
+            return _slowcat(*alternatives)
+        
+        else:
+            # Unknown token, skip
+            return Pattern.silence()
+
+
+def _parse_mini(code: str) -> Pattern:
+    """Parse a mini-notation string into a Pattern."""
+    tokens = list(_tokenize(code))
+    if not tokens:
+        return Pattern.silence()
+    parser = _MiniParser(tokens)
+    return parser.parse()
+
+
+# -----------------------------
+# Pattern Registry (for update loop)
+# -----------------------------
+_active_patterns = []  # List of (pattern, root, cycle_beats) tuples
+
+
+def _update_patterns():
+    """Update all active patterns. Called from tc.update()."""
+    try:
+        ppq = vfx.context.PPQ
+    except AttributeError:
+        return  # Not in VFX context
+    
+    # Use internal tick counter for consistent timing
+    current_tick = _get_current_tick()
+    
+    for pattern, root, cycle_beats in _active_patterns[:]:
+        events = pattern.tick(current_tick, ppq, cycle_beats)
+        for e in events:
+            # Create and trigger note
+            note_val = root + e.value if e.value is not None else None
+            if note_val is not None:
+                # Calculate duration from event's whole span
+                if e.whole:
+                    duration_time = e.whole[1] - e.whole[0]
+                    duration_beats = float(duration_time) * cycle_beats
+                else:
+                    duration_beats = 1  # Default to 1 beat
+                
+                note = Note(m=int(note_val), l=duration_beats)
+                note.trigger(cut=False)
+
+
+# -----------------------------
+# Public API: tc.n() / tc.note()
+# -----------------------------
+def note(pattern_str: str, c: int = 4, root: int = 60) -> Pattern:
+    """
+    Create a pattern from mini-notation.
+    
+    Args:
+        pattern_str: Mini-notation string (e.g., "0 3 5 7")
+        c: Cycle duration in beats (default 4 = one bar)
+        root: Root note (default 60 = C4). Values in pattern are offsets from root.
+    
+    Returns:
+        Pattern object. Call .start() to begin playback.
+    
+    Example:
+        pattern = tc.n("0 3 5 7", c=4, root=60)  # C major 7 arpeggio
+        pattern.start()
+        
+        def onTick():
+            tc.update()
+    """
+    pat = _parse_mini(pattern_str)
+    _active_patterns.append((pat, root, c))
+    return pat
+
+
+# Alias
+n = note
+
+
+# -----------------------------
+# MIDI.n() Method
+# -----------------------------
+# Store pattern data on MIDI instances
+_midi_patterns = {}  # voice_id -> (pattern, cycle_beats, root, midi_wrapper)
+
+
+def _midi_n(self, pattern_str: str, c: int = 4) -> Pattern:
+    """
+    Create a pattern from mini-notation, using this voice's note as root.
+    
+    Args:
+        pattern_str: Mini-notation string (e.g., "0 3 5 7")
+        c: Cycle duration in beats (default 4 = one bar)
+    
+    Returns:
+        Pattern object (auto-started, tied to this voice's lifecycle)
+    
+    Example:
+        def onTriggerVoice(incomingVoice):
+            midi = tc.MIDI(incomingVoice)
+            midi.n("0 3 5 7", c=4)  # Arpeggio from incoming note
+            midi.trigger()
+    """
+    pat = _parse_mini(pattern_str)
+    root = self.note  # Use incoming MIDI note as root
+    
+    # Register pattern with this MIDI wrapper (self is the triggered voice)
+    # We use id(self) since self is the MIDI wrapper that will be in vfx.context.voices
+    voice_id = id(self.parentVoice)
+    _midi_patterns[voice_id] = (pat, c, root, self)
+    
+    # Auto-start with internal tick counter
+    # Pattern starts at current tick; update() processes patterns before incrementing
+    pat.start(_get_current_tick())
+    
+    return pat
+
+
+# Attach method to MIDI class
+MIDI.n = _midi_n
+
+
+_DEBUG_PATTERNS = True  # Set to False to disable debug logging
+
+
+def _update_midi_patterns():
+    """Update MIDI-bound patterns. Called from tc.update()."""
+    try:
+        ppq = vfx.context.PPQ
+    except AttributeError:
+        return
+    
+    # Use internal tick counter for consistent timing
+    current_tick = _get_current_tick()
+    
+    for voice_id in list(_midi_patterns.keys()):
+        pat, cycle_beats, root, midi_wrapper = _midi_patterns[voice_id]
+        
+        # Check if the pattern is still running
+        if not pat._running:
+            del _midi_patterns[voice_id]
+            continue
+        
+        # Debug: show timing info
+        rel_tick = current_tick - pat._start_tick
+        ticks_per_cycle = ppq * cycle_beats
+        arc_start = Fraction(rel_tick, ticks_per_cycle)
+        arc_end = Fraction(rel_tick + 1, ticks_per_cycle)
+        
+        if _DEBUG_PATTERNS and rel_tick < 10:  # Only first 10 ticks
+            print(f"[Pattern] tick={current_tick} rel={rel_tick} start_tick={pat._start_tick} arc=({float(arc_start):.4f}, {float(arc_end):.4f})")
+        
+        # Process events
+        events = pat.tick(current_tick, ppq, cycle_beats)
+        
+        if _DEBUG_PATTERNS and events:
+            for e in events:
+                print(f"[Pattern] EVENT value={e.value} whole=({float(e.whole[0]):.4f}, {float(e.whole[1]):.4f}) part=({float(e.part[0]):.4f}, {float(e.part[1]):.4f}) has_onset={e.has_onset()}")
+        
+        for e in events:
+            note_val = root + e.value if e.value is not None else None
+            if note_val is not None:
+                # Calculate duration from event's whole span
+                if e.whole:
+                    duration_time = e.whole[1] - e.whole[0]
+                    duration_beats = float(duration_time) * cycle_beats
+                else:
+                    duration_beats = 1
+                
+                if _DEBUG_PATTERNS:
+                    print(f"[Pattern] TRIGGER note={note_val} duration={duration_beats} beats")
+                
+                note_obj = Note(m=int(note_val), l=duration_beats)
+                note_obj.trigger(cut=False, parent=midi_wrapper.parentVoice)
+
+
+def stop_patterns_for_voice(parent_voice):
+    """
+    Stop all patterns associated with a parent voice.
+    Call this in onReleaseVoice() to clean up MIDI-bound patterns.
+    
+    Args:
+        parent_voice: The incoming voice that was released
+    """
+    voice_id = id(parent_voice)
+    if voice_id in _midi_patterns:
+        pat, _, _, _ = _midi_patterns[voice_id]
+        pat.stop()
+        del _midi_patterns[voice_id]
+
+
+def update():
+    """
+    Process triggers, releases, and patterns. Call in onTick().
+    
+    Order of operations:
+    1. Process pending triggers and releases
+    2. Update standalone patterns (tc.n)
+    3. Update MIDI-bound patterns (midi.n)
+    4. Increment tick counter (so patterns created this frame start at tick 0)
+    """
+    global _internal_tick
+    
+    _base_update()
+    _update_patterns()
+    _update_midi_patterns()
+    
+    # Increment tick AFTER all processing, so patterns created this frame start at tick 0
+    _internal_tick += 1
 
 
 # Initialization message
