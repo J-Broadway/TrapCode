@@ -20,6 +20,57 @@ def _warn_clamp(name, value, lo, hi):
         print(f"[TrapCode]{where} '{name}' value {value} outside [{lo}, {hi}] -> clamped")
 
 # -----------------------------
+# Debug System
+# -----------------------------
+_debug_enabled = False
+_debug_level = 1
+
+def _log(category: str, msg: str, level: int = 1):
+    """
+    Internal logging helper.
+    
+    Args:
+        category: Log category for prefix (e.g., 'patterns', 'triggers')
+        msg: Message to log
+        level: Required debug level (1=important, 2=verbose)
+    """
+    if not _debug_enabled:
+        return
+    if level > _debug_level:
+        return
+    print(f"[TrapCode:{category}] {msg}")
+
+def debug(enable=None, *, level=None):
+    """
+    Toggle or query debug logging.
+    
+    Args:
+        enable: True to enable, False to disable, None to query
+        level: Debug verbosity (1=important events, 2=verbose). Keyword-only.
+    
+    Returns:
+        dict with 'enabled' and 'level' keys when querying (enable=None)
+        None when setting
+    
+    Examples:
+        tc.debug(True)            # Enable, level 1
+        tc.debug(True, level=2)   # Enable, level 2 (verbose)
+        tc.debug(False)           # Disable
+        tc.debug()                # {'enabled': True, 'level': 2}
+    """
+    global _debug_enabled, _debug_level
+    
+    if enable is None:
+        return {'enabled': _debug_enabled, 'level': _debug_level}
+    
+    _debug_enabled = bool(enable)
+    if level is not None:
+        _debug_level = int(level)
+    
+    if _debug_enabled:
+        _log("debug", f"enabled (level={_debug_level})")
+
+# -----------------------------
 # Mixins
 # -----------------------------
 class PulseMixin:
@@ -1365,7 +1416,15 @@ def _update_patterns():
     # Use internal tick counter for consistent timing
     current_tick = _get_current_tick()
     
-    for pattern, root, cycle_beats in _active_patterns[:]:
+    for pattern, root_raw, cycle_beats_raw in _active_patterns[:]:
+        # Resolve dynamic parameters each tick
+        root = _resolve_dynamic(root_raw)
+        cycle_beats = _resolve_dynamic(cycle_beats_raw)
+        try:
+            cycle_beats = max(1, int(cycle_beats))
+        except (TypeError, ValueError):
+            cycle_beats = 4
+        
         events = pattern.tick(current_tick, ppq, cycle_beats)
         for e in events:
             # Create and trigger note
@@ -1385,20 +1444,23 @@ def _update_patterns():
 # -----------------------------
 # Public API: tc.n() / tc.note()
 # -----------------------------
-def note(pattern_str: str, c: int = 4, root: int = 60) -> Pattern:
+def note(pattern_str: str, c = 4, root = 60) -> Pattern:
     """
     Create a pattern from mini-notation.
     
     Args:
         pattern_str: Mini-notation string (e.g., "0 3 5 7")
-        c: Cycle duration in beats (default 4 = one bar)
+        c: Cycle duration in beats (default 4 = one bar).
+           Can be a static value OR a UI wrapper for dynamic updates.
         root: Root note (default 60 = C4). Values in pattern are offsets from root.
+              Can be a static value OR a UI wrapper for dynamic updates.
     
     Returns:
         Pattern object. Call .start() to begin playback.
     
     Example:
-        pattern = tc.n("0 3 5 7", c=4, root=60)  # C major 7 arpeggio
+        pattern = tc.n("0 3 5 7", c=4, root=60)  # Static values
+        pattern = tc.n("0 3 5 7", c=tc.par.CycleKnob, root=tc.par.RootKnob)  # Dynamic
         pattern.start()
         
         def onTick():
@@ -1420,13 +1482,23 @@ n = note
 _midi_patterns = {}  # voice_id -> (pattern, cycle_beats, root, midi_wrapper)
 
 
-def _midi_n(self, pattern_str: str, c: int = 4) -> Pattern:
+def _resolve_dynamic(value):
+    """Resolve a value that may be static or dynamic (wrapper/callable)."""
+    if callable(value):
+        return value()
+    if hasattr(value, 'val'):
+        return value.val
+    return value
+
+
+def _midi_n(self, pattern_str: str, c = 4) -> Pattern:
     """
     Create a pattern from mini-notation, using this voice's note as root.
     
     Args:
         pattern_str: Mini-notation string (e.g., "0 3 5 7")
-        c: Cycle duration in beats (default 4 = one bar)
+        c: Cycle duration in beats (default 4 = one bar).
+           Can be a static value OR a UI wrapper (e.g., tc.par.MyKnob) for dynamic updates.
     
     Returns:
         Pattern object (auto-started, tied to this voice's lifecycle)
@@ -1434,14 +1506,14 @@ def _midi_n(self, pattern_str: str, c: int = 4) -> Pattern:
     Example:
         def onTriggerVoice(incomingVoice):
             midi = tc.MIDI(incomingVoice)
-            midi.n("0 3 5 7", c=4)  # Arpeggio from incoming note
-            midi.trigger()
+            midi.n("0 3 5 7", c=4)  # Static: 4 beats per cycle
+            midi.n("0 3 5 7", c=tc.par.MyKnob)  # Dynamic: follows knob value
     """
     pat = _parse_mini(pattern_str)
     root = self.note  # Use incoming MIDI note as root
     
     # Register pattern with this MIDI wrapper (self is the triggered voice)
-    # We use id(self) since self is the MIDI wrapper that will be in vfx.context.voices
+    # Store c as-is (may be int, float, wrapper, or callable) for dynamic resolution
     voice_id = id(self.parentVoice)
     _midi_patterns[voice_id] = (pat, c, root, self)
     
@@ -1456,7 +1528,6 @@ def _midi_n(self, pattern_str: str, c: int = 4) -> Pattern:
 MIDI.n = _midi_n
 
 
-_DEBUG_PATTERNS = True  # Set to False to disable debug logging
 
 
 def _update_midi_patterns():
@@ -1470,7 +1541,14 @@ def _update_midi_patterns():
     current_tick = _get_current_tick()
     
     for voice_id in list(_midi_patterns.keys()):
-        pat, cycle_beats, root, midi_wrapper = _midi_patterns[voice_id]
+        pat, cycle_beats_raw, root, midi_wrapper = _midi_patterns[voice_id]
+        
+        # Resolve dynamic cycle_beats each tick
+        cycle_beats = _resolve_dynamic(cycle_beats_raw)
+        try:
+            cycle_beats = max(1, int(cycle_beats))  # Ensure positive integer
+        except (TypeError, ValueError):
+            cycle_beats = 4  # Fallback to default
         
         # Check if the pattern is still running
         if not pat._running:
@@ -1483,15 +1561,13 @@ def _update_midi_patterns():
         arc_start = Fraction(rel_tick, ticks_per_cycle)
         arc_end = Fraction(rel_tick + 1, ticks_per_cycle)
         
-        if _DEBUG_PATTERNS and rel_tick < 10:  # Only first 10 ticks
-            print(f"[Pattern] tick={current_tick} rel={rel_tick} start_tick={pat._start_tick} arc=({float(arc_start):.4f}, {float(arc_end):.4f})")
+        _log("patterns", f"tick={current_tick} rel={rel_tick} start_tick={pat._start_tick} arc=({float(arc_start):.4f}, {float(arc_end):.4f}) c={cycle_beats}", level=2)
         
         # Process events
         events = pat.tick(current_tick, ppq, cycle_beats)
         
-        if _DEBUG_PATTERNS and events:
-            for e in events:
-                print(f"[Pattern] EVENT value={e.value} whole=({float(e.whole[0]):.4f}, {float(e.whole[1]):.4f}) part=({float(e.part[0]):.4f}, {float(e.part[1]):.4f}) has_onset={e.has_onset()}")
+        for e in events:
+            _log("patterns", f"EVENT value={e.value} whole=({float(e.whole[0]):.4f}, {float(e.whole[1]):.4f}) part=({float(e.part[0]):.4f}, {float(e.part[1]):.4f}) has_onset={e.has_onset()}", level=2)
         
         for e in events:
             note_val = root + e.value if e.value is not None else None
@@ -1503,8 +1579,7 @@ def _update_midi_patterns():
                 else:
                     duration_beats = 1
                 
-                if _DEBUG_PATTERNS:
-                    print(f"[Pattern] TRIGGER note={note_val} duration={duration_beats} beats")
+                _log("patterns", f"TRIGGER note={note_val} duration={duration_beats} beats", level=1)
                 
                 note_obj = Note(m=int(note_val), l=duration_beats)
                 note_obj.trigger(cut=False, parent=midi_wrapper.parentVoice)

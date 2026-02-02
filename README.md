@@ -50,7 +50,32 @@ tc._norm_from_range(5, 10, 10)  # Returns 0.0 (handles lo == hi)
 tc._warn_clamp('Edge', -1, 0, 1)  # Warns and clamps to 0
 ```
 
-### 3. Parameter Namespace (`par`)
+### 3. Debug Logging
+Toggle debug output with log levels for controlling verbosity.
+
+**Code Example**:
+```python
+tc.debug(True)            # Enable debug logging (level 1)
+tc.debug(True, level=2)   # Enable verbose logging (level 2)
+tc.debug(False)           # Disable debug logging
+tc.debug()                # Query state: {'enabled': True, 'level': 2}
+```
+
+**Log Levels**:
+| Level | Description |
+|-------|-------------|
+| 1 | Important events (triggers, releases, errors) |
+| 2 | Verbose (tick timing, arc calculations, internal state) |
+
+When enabled, log messages appear with category prefixes like `[TrapCode:patterns]` for easy filtering.
+
+**Edge Case**:
+```python
+tc.debug()['enabled']  # Access enabled state directly
+tc.debug(True, level=3)  # Level > 2 works but no extra output currently defined
+```
+
+### 4. Parameter Namespace (`par`)
 Dynamic object for accessing UI controls globally via attributes. Controls are added as attributes to `tc.par` during creation in `createDialog()`, using `par_name` (if provided) or a sanitized version of `name` as the attribute name. Default behavior: If `par_name` is None (not set), it defaults to a sanitized `name` where non-word characters (e.g., spaces, punctuation) are replaced with '_' and leading/trailing '_' are stripped. Attribute names must be valid Python identifiers (start with letter/underscore, no spaces/special chars except '_'); invalid ones raise ValueError.
 
 **Defaults**:
@@ -81,7 +106,7 @@ ui.Knob(par_name='123invalid')  # Raises ValueError (invalid identifier)
 ui.Knob(par_name='my_knob')     # Raises ValueError if 'my_knob' already exists
 ```
 
-### 4. Output Controllers
+### 5. Output Controllers
 Manage output controllers with `tc.output`.
 
 - `add(name, default=0.0)`: Adds a controller if not declared.
@@ -102,7 +127,7 @@ tc.output.add('MyOut', default='invalid')  # Defaults to 0.0 (coerces to float)
 tc.output.set('NonExistent', 1.0)  # May fail silently if not added
 ```
 
-### 5. Exports (Batch Update and Proxies)
+### 6. Exports (Batch Update and Proxies)
 Bind UI controls to output controllers for automation. `tc.exports` handles batch updates and introspection, while proxies are per-control sinks.
 
 - Modes: `None` (no export), `'bind'` (follows UI value), `'custom'` (manual set via `.export.val`).
@@ -135,7 +160,7 @@ tc.par.CustomKnob.export = 'invalid'  # Raises TypeError (must be numeric)
 tc.exports.update()  # If exception in custom mode, skips silently (robustness fix)
 ```
 
-### 6. UI Controls
+### 7. UI Controls
 Create and manage UI elements with factory methods. All support `name` (UI label), `par_name` (optional custom attribute name on `tc.par`, defaults to sanitized `name`), `export` (mode: None/'bind'/'custom', defaults to None), and `export_name` (optional custom output controller name, defaults to `par_name`). If mode is set, adds a controller via `tc.output.add()`.
 
 For grouped controls, values are accessed internally using qualified keys like `"Group: Control"` to handle hierarchy correctly, but users interact via plain `par.par_name.val`.
@@ -298,7 +323,7 @@ The baseline updates only when a change is detected. If knob moves `0 â†’ 0.3 â†
 
 **Note**: Surface presets are saved to `~/Documents/Image-Line/Presets/Plugin presets/Effects/Control Surface/`
 
-### 7. Arithmetic and Coercion
+### 8. Arithmetic and Coercion
 Wrappers support math operations and coercion.
 
 **Code Example**:
@@ -315,7 +340,7 @@ tc.par.MyText + 1  # Raises if val non-numeric
 tc.par.MyKnob == tc.par.MyIntKnob  # Coerces both to float for comparison
 ```
 
-### 8. Grouping
+### 9. Grouping
 Context manager for UI groups. Grouped controls use internal qualified keys (e.g., `"Settings: InnerKnob"`) for value get/set, but accessed via plain `par.par_name`.
 
 **Code Example**:
@@ -333,7 +358,7 @@ with ui.group('Nested'):
 print(tc.par.Deep._form_key())  # 'Inner: Deep' (only innermost group used)
 ```
 
-### 9. Parameter Filtering (`pars`)
+### 10. Parameter Filtering (`pars`)
 Retrieve filtered lists or dicts of parameter wrappers. Defaults to list; use `as_dict=True` for dict (keyed by `par_name`).
 
 Filters:
@@ -366,7 +391,7 @@ tc.pars(type='invalid')  # Returns empty (no matching type)
 tc.pars(as_dict=True, group=None)  # Dict of ungrouped only
 ```
 
-### 10. Groups Utility
+### 11. Groups Utility
 `tc.groups()`: Returns sorted list of unique group names (excludes None).
 
 **Code Example**:
@@ -379,7 +404,7 @@ print(tc.groups())  # e.g., ['Settings', 'test']
 # If no groups: [] (empty list)
 ```
 
-### 11. Voice Triggering (Note API)
+### 12. Voice Triggering (Note API)
 Programmatic MIDI note creation with beat-relative timing.
 
 #### Note Class
@@ -480,5 +505,93 @@ ticks = tc.beats_to_ticks(1)  # Returns PPQ (ticks per quarter note)
 ```
 
 **Important**: Always call `tc.update()` in `onTick()` for triggers to fire and voices to release.
+
+### 13. Pattern Engine (Mini-Notation)
+Generate rhythmic patterns using Strudel/TidalCycles-inspired mini-notation. Patterns subdivide time cyclically, perfect for arpeggios, sequences, and generative rhythms.
+
+#### Basic Usage
+```python
+# Standalone pattern (plays absolute MIDI notes)
+pattern = tc.n("60 62 64 65", c=4)  # 4 notes over 4 beats
+pattern.start()
+
+def onTick():
+    tc.update()  # Processes patterns automatically
+```
+
+#### Mini-Notation Syntax
+
+| Syntax | Description | Example |
+|--------|-------------|---------|
+| `a b c` | Sequence (subdivided evenly) | `"60 62 64"` - 3 notes per cycle |
+| `[a b]` | Subdivision group | `"60 [61 62] 63"` - middle slot split |
+| `<a b c>` | Alternation (one per cycle) | `"<60 62 64>"` - cycles through notes |
+| `*n` | Fast (repeat n times) | `"60*4"` - note 4x per cycle |
+| `/n` | Slow (span n cycles) | `"60/2"` - note spans 2 cycles |
+| `~` or `-` | Rest (silence) | `"60 ~ 62 ~"` - notes with gaps |
+
+#### Relative Patterns with Root
+Values are treated as offsets from `root` (default 60 = C4):
+```python
+tc.n("0 3 5 7", root=60)  # C E G B (C major 7)
+tc.n("0 4 7", root=48)    # C3 E3 G3
+```
+
+#### MIDI-Bound Patterns
+Patterns can follow incoming MIDI notes:
+```python
+def onTriggerVoice(incomingVoice):
+    midi = tc.MIDI(incomingVoice)
+    midi.n("0 3 5 7", c=4)  # Arpeggio from incoming note
+    midi.trigger()
+
+def onReleaseVoice(incomingVoice):
+    for v in vfx.context.voices:
+        if tc.get_parent(v) == incomingVoice:
+            v.release()
+
+def onTick():
+    tc.update()
+```
+
+The pattern uses the incoming MIDI note as root and stops when the parent voice releases.
+
+#### Nested Patterns
+```python
+tc.n("60 [61 62] 63")       # Middle element subdivided
+tc.n("[60 61] [62 63 64]")  # Two subdivided groups
+tc.n("<60 [61 62]> 63")     # Alternation with subdivision
+```
+
+#### Pattern Control
+```python
+pattern = tc.n("0 3 5 7")
+pattern.start()           # Begin playback
+pattern.stop()            # Pause
+pattern.reset()           # Restart from beginning
+```
+
+#### Cycle Duration
+The `c` parameter sets cycle length in beats:
+```python
+tc.n("60 62 64 65", c=4)  # 4 beats = 1 bar in 4/4
+tc.n("60 62 64", c=2)     # 2 beats = half bar
+tc.n("60 62", c=1)        # 1 beat = quarter note total
+```
+
+#### Advanced Examples
+```python
+# Euclidean-style pattern with rests
+tc.n("60 ~ ~ 60 ~ 60 ~ ~", c=8)  # 3 hits over 8 slots
+
+# Fast arpeggio
+tc.n("0 3 5 7", c=1)  # Full arpeggio in 1 beat
+
+# Slow chord progression
+tc.n("<0 3 5>", c=4)  # One note per bar, cycles through
+
+# Complex rhythm
+tc.n("60 [61 62]*2 ~ 63", c=4)  # Subdivision with fast modifier
+```
 
 Call `tc.exports.update()` in `onTick()` to push export values. Use unique `par_name` for attribute access. For full code, see TrapCode.py.
