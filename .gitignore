@@ -6,3 +6,4 @@ scope/
 __pycache__/
 *.pyc
 *.pyo
+scope/strudel/
