@@ -12,19 +12,71 @@ Enable `.n()` patterns (and chained modifiers like `.v()`, `.pan()`, `.chord()`)
 
 ### Creating Patterns with Bus Registration
 
+Two entry points: `midi.n()` (voice-scoped) and `tc.n()` (standalone).
+
+#### Voice-Scoped: `midi.n()` (in onTriggerVoice)
+
+Pattern is automatically tied to the incoming voice lifecycle:
+
 ```python
 def onTriggerVoice(incomingVoice):
     midi = tc.MIDI(incomingVoice)
     
-    # Register pattern to bus
+    # Register pattern to bus (tied to incomingVoice)
     midi.n("<0 1 2 3>", c=4, bus='melody')
     
     # Ghost pattern (no audio, state only)
-    midi.n("<0 1 2 3>", c=4, trigger=False, bus='clock')
+    midi.n("<0 1 2 3>", c=4, mute=True, bus='clock')
     
     # Chained modifiers
     midi.n("<0 1 2 3>").v("<100 50 75>").pan("<-1 0 1>", bus='complex')
+
+def onReleaseVoice(incomingVoice):
+    tc.stop_patterns_for_voice(incomingVoice)  # Auto-cleanup
 ```
+
+#### Standalone: `tc.n()` (in onTick or globally)
+
+Pattern lifecycle is manual or optionally tied to a parent voice:
+
+```python
+# Option 1: Tied to a parent voice (cleaned up on release)
+def onTriggerVoice(v):
+    tc.n("<0 3 5>", c=4, parent=v, bus='melody')  # Explicitly tied to v
+
+# Option 2: Truly standalone (persists until .stop())
+_clock = None
+def onTick():
+    global _clock
+    if _clock is None:
+        _clock = tc.n("<0 1 2 3>", c=1, mute=True, bus='clock')
+    
+    if _clock:  # onset
+        print(f"Beat {_clock['step']}")
+    
+    tc.update()
+
+# Manual cleanup for standalone patterns
+_clock.stop()  # Removes from bus and stops ticking
+```
+
+#### Parameter Comparison
+
+| Parameter | `midi.n()` | `tc.n()` |
+|-----------|-----------|----------|
+| `c` | Cycle beats | Cycle beats |
+| `root` | Auto (from MIDI note) | Required or default 60 |
+| `parent` | Auto (incomingVoice) | Optional, explicit |
+| `bus` | Optional | Optional |
+| `mute` | Default False | Default False |
+
+#### Lifecycle Summary
+
+| Type | Created in | Tied to | Cleanup |
+|------|-----------|---------|---------|
+| `midi.n()` | `onTriggerVoice` | Incoming voice | Auto via `stop_patterns_for_voice()` |
+| `tc.n(parent=v)` | Anywhere | Specified voice | Auto via `stop_patterns_for_voice()` |
+| `tc.n()` (no parent) | Anywhere | None | Manual via `.stop()` |
 
 ### Accessing Bus State
 
@@ -135,7 +187,7 @@ if 'drums' in tc.buses:
     'phase': 0.0,      # float: Phase within cycle [0.0-1.0)
     'cycle': 0,        # int: Current cycle number
     'onset': False,    # bool: True if new event started this tick
-    'trigger': True,   # bool: True = audible, False = ghost/silent
+    'mute': False,     # bool: False = audible, True = silent/ghost mode
     
     # --- VFX Voice properties ---
     'note': 60.0,      # float: MIDI note number (fractional for microtuning)
@@ -169,9 +221,9 @@ if 'drums' in tc.buses:
 class PatternChain:
     """Universal container for pattern-based operations."""
     
-    def __init__(self, midi_wrapper, trigger=True):
+    def __init__(self, midi_wrapper, mute=False):
         self._midi = midi_wrapper
-        self._trigger = trigger
+        self._mute = mute
         self._patterns = {}           # method_name -> Pattern
         self._updaters = []           # List of update functions
         self._prev_state = {}         # For change detection
@@ -181,7 +233,7 @@ class PatternChain:
             'phase': 0.0,
             'cycle': 0,
             'onset': False,
-            'trigger': trigger,
+            'mute': mute,
             'note': 60.0,
             'finePitch': 0.0,
             'velocity': 0.8,
@@ -253,12 +305,12 @@ class PatternChain:
         for updater in self._updaters:
             updater(current_tick, ppq, cycle_beats)
         
-        # Trigger notes if enabled and onset occurred
-        if self._trigger and self._state['onset']:
-            self._trigger_notes()
+        # Trigger notes if not muted and onset occurred
+        if not self._mute and self._state['onset']:
+            self._fire_notes()
     
-    def _trigger_notes(self):
-        """Fire MIDI notes for current state. Skipped when trigger=False."""
+    def _fire_notes(self):
+        """Fire MIDI notes for current state. Skipped when mute=True."""
         for midi_note in self._state['notes']:
             note_obj = Note(
                 m=int(midi_note),
@@ -297,6 +349,26 @@ class PatternChain:
         self._patterns['chord'] = _parse_mini(pattern_str)
         self._register({'chord': ''}, updater=self._update_chord)
         return self
+    
+    # --- Lifecycle ---
+    
+    def stop(self):
+        """
+        Stop the pattern and remove from bus.
+        
+        For standalone patterns (tc.n without parent), this is required
+        for cleanup. Voice-scoped patterns are cleaned up automatically.
+        """
+        self._running = False
+        
+        # Remove from bus if registered
+        if self._bus_name and self._bus_voice_id:
+            bus = tc.bus(self._bus_name)
+            if self._bus_voice_id in bus:
+                del bus[self._bus_voice_id]
+        
+        # Remove from pattern registry
+        _unregister_chain(self)
 ```
 
 ### 2. BusRegistry Class
@@ -410,31 +482,67 @@ def bus(name: str) -> BusRegistry:
     return _buses[name]
 ```
 
-### 4. Integration with MIDI Class
+### 4. Standalone tc.n() Function
+
+```python
+def n(pattern_str: str, c=4, root=60, parent=None, mute=False, bus=None) -> PatternChain:
+    """
+    Create a standalone pattern from mini-notation.
+    
+    Args:
+        pattern_str: Mini-notation string (e.g., "0 3 5 7")
+        c: Cycle duration in beats (default 4)
+        root: Root note (default 60 = C4)
+        parent: Optional parent voice (ties pattern to voice lifecycle)
+        mute: If True, pattern is ghost (state-only, no audio)
+        bus: Optional bus name for state access
+    
+    Returns:
+        PatternChain object
+    """
+    chain = PatternChain(midi_wrapper=None, mute=mute)
+    chain.n(pattern_str, c=c, root=root)
+    
+    if bus:
+        voice_id = tc.bus(bus).register(chain)
+        chain._bus_name = bus
+        chain._bus_voice_id = voice_id
+    
+    # Register for update loop
+    _register_chain(parent, chain, c, root)
+    
+    return chain
+```
+
+### 5. Integration with MIDI Class
 
 ```python
 class MIDI:
-    def n(self, pattern_str: str, c=4, root=None, trigger=True, bus=None, **kwargs):
-        """Create pattern, optionally register to bus."""
-        chain = PatternChain(self, trigger=trigger)
+    def n(self, pattern_str: str, c=4, root=None, mute=False, bus=None, **kwargs):
+        """Create pattern, optionally register to bus. Auto-tied to parent voice."""
+        chain = PatternChain(self, mute=mute)
         chain.n(pattern_str, c=c, root=root or self.note, **kwargs)
         
         if bus:
             voice_id = tc.bus(bus).register(chain)
+            chain._bus_name = bus
+            chain._bus_voice_id = voice_id
             self._bus_registrations.append((bus, voice_id))
         
-        # Store for update loop
+        # Store for update loop (tied to parentVoice)
         _register_chain(self.parentVoice, chain, c, root or self.note)
         
         return chain
     
-    def chord(self, pattern_str: str, c=4, trigger=True, bus=None, **kwargs):
+    def chord(self, pattern_str: str, c=4, mute=False, bus=None, **kwargs):
         """Create chord pattern, optionally register to bus."""
-        chain = PatternChain(self, trigger=trigger)
+        chain = PatternChain(self, mute=mute)
         chain.chord(pattern_str, c=c, **kwargs)
         
         if bus:
             voice_id = tc.bus(bus).register(chain)
+            chain._bus_name = bus
+            chain._bus_voice_id = voice_id
             self._bus_registrations.append((bus, voice_id))
         
         _register_chain(self.parentVoice, chain, c, self.note)
@@ -513,7 +621,7 @@ def onTick():
 ```python
 def onTriggerVoice(v):
     midi = tc.MIDI(v)
-    midi.n("<0 1 2 3>", c=1, trigger=False, bus='clock')
+    midi.n("<0 1 2 3>", c=1, mute=True, bus='clock')
 
 def onTick():
     clock = tc.bus('clock').oldest()
@@ -542,6 +650,41 @@ def onReleaseVoice(v):
     if last:
         notes = [c.dict()['notes'] for c in last]
         print(f"Released: {notes}")
+```
+
+### Standalone tc.n() with Parent Voice
+```python
+def onTriggerVoice(v):
+    # Standalone pattern tied to voice lifecycle
+    tc.n("<0 3 5>", c=4, parent=v, bus='melody')
+
+def onReleaseVoice(v):
+    tc.stop_patterns_for_voice(v)  # Cleans up tc.n(parent=v) patterns too
+```
+
+### Standalone tc.n() Persistent (Global Clock)
+```python
+_clock = None
+
+def onTick():
+    global _clock
+    
+    # Create once, persists across all voices
+    if _clock is None:
+        _clock = tc.n("<0 1 2 3>", c=1, mute=True, bus='clock')
+    
+    # React to clock steps
+    if _clock:
+        print(f"Beat {_clock['step'] + 1}")
+    
+    tc.update()
+
+# Manual cleanup when needed
+def cleanup():
+    global _clock
+    if _clock:
+        _clock.stop()
+        _clock = None
 ```
 
 ---
@@ -573,10 +716,10 @@ def onTick():
 
 ### Ghost Patterns (State-Only)
 
-Use `trigger=False` for patterns that track state without producing sound:
+Use `mute=True` for patterns that track state without producing sound:
 
 ```python
-midi.n("<0 1 2 3>", c=1, trigger=False, bus='clock')
+midi.n("<0 1 2 3>", c=1, mute=True, bus='clock')
 
 # In onTick, use as a sequencer clock
 clock = tc.bus('clock').oldest()
