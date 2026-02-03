@@ -1232,6 +1232,7 @@ class PatternChain:
             'cycle': 0,
             'onset': False,
             'mute': mute,
+            'parentVoice': None,    # Parent voice (incoming MIDI voice)
             'note': 60.0,
             'finePitch': 0.0,
             'velocity': 0.8,
@@ -1680,6 +1681,55 @@ class Pattern:
         """
         return self.fast(Fraction(1) / Fraction(factor))
     
+    def repeatCycles(self, n) -> 'Pattern':
+        """
+        Repeat each cycle of the pattern n times.
+        
+        Unlike fast(), this doesn't compress time within each cycle.
+        Instead, it repeats the entire cycle content n times before
+        moving to the next cycle of the source pattern.
+        
+        For example, with a slowcat pattern <a b>:
+        - repeatCycles(2) gives: a a b b a a b b ...
+        - fast(2) gives: a b a b a b ... (twice as fast)
+        
+        This is used by the replicate (!) operator.
+        """
+        n = int(n)
+        if n <= 0:
+            return Pattern.silence()
+        if n == 1:
+            return self
+        
+        outer_self = self
+        
+        def query(arc: Arc) -> List[Event]:
+            # Get the current cycle number
+            cycle = int(arc[0])
+            # Calculate which source cycle this maps to
+            source_cycle = cycle // n
+            # Calculate the offset within the repetition group
+            delta = Fraction(cycle - source_cycle * n)
+            
+            # Shift the query back to the source cycle
+            shifted_arc = (arc[0] - delta, arc[1] - delta)
+            
+            # Query the source pattern
+            events = outer_self.query(shifted_arc)
+            
+            # Shift the results forward to the current cycle
+            result = []
+            for e in events:
+                new_whole = None
+                if e.whole:
+                    new_whole = (e.whole[0] + delta, e.whole[1] + delta)
+                new_part = (e.part[0] + delta, e.part[1] + delta)
+                result.append(Event(e.value, new_whole, new_part))
+            
+            return result
+        
+        return Pattern(query)
+    
     def degrade(self, probability: float = 0.5) -> 'Pattern':
         """
         Randomly drop events with given probability of keeping them.
@@ -2078,12 +2128,17 @@ class _MiniParser:
                     # @n weight must be int
                     weight = int(float(num_tok.value))
                 elif tok.type == 'BANG':
-                    # !n replication must be int
+                    # !n replication: repeat each cycle n times, then speed up
+                    # This matches Strudel's behavior: pat._repeatCycles(n)._fast(n)
+                    # ALSO sets weight so replicated element takes proportional time
+                    # Example: "a!3 b" -> a takes 3/4 time, b takes 1/4
                     num = int(float(num_tok.value))
                     if num > 0:
-                        pat = _sequence(*[pat] * num)
+                        pat = pat.repeatCycles(num).fast(num)
+                        weight = num  # Replicated elements take proportional time
                     else:
                         pat = Pattern.silence()
+                        weight = 0
         
         return (pat, weight)
     
@@ -2122,16 +2177,46 @@ class _MiniParser:
             return inner
         
         elif tok.type == 'LANGLE':
-            # Alternation: <a b c> — each alternative is a full layer (sequence)
-            # This allows weighted sequences inside: <0@2 1 2 3> means
-            # one layer with 0 getting 2/5 time, others 1/5 each
+            # Slowcat notation: <a b c> — distributes elements across cycles
+            # Unlike [a b c] which subdivides within a cycle, <a b c> plays
+            # a on cycle 0, b on cycle 1, c on cycle 2, then repeats
+            #
+            # Implementation: parse contents as weighted sequence, then slow
+            # by total weight. This matches Strudel's polymeter_slowcat behavior.
+            # 
+            # Example: <a!2 b> → sequence with total weight 3, slowed by 3
+            #   - Cycle 0: first 1/3 of sequence (a at 2x speed in 2/3 slot)
+            #   - Cycle 1: middle 1/3 of sequence (rest of a)
+            #   - Cycle 2: last 1/3 of sequence (b in 1/3 slot)
             self.consume('LANGLE')
-            # Parse the entire contents as a single layer
-            inner = self.parse_layer()
+            
+            # Parse contents as weighted sequence (same as parse_layer)
+            elements = []  # List of (pattern, weight) tuples
+            while self.peek() and self.peek().type not in ('RANGLE', 'COMMA'):
+                elements.append(self.parse_element())
+            
             self.consume('RANGLE')
             
-            # Wrap in slowcat so it cycles through (even single layer works)
-            return _slowcat(inner)
+            if not elements:
+                return Pattern.silence()
+            
+            # Calculate total weight
+            total_weight = sum(w for _, w in elements)
+            
+            # Build the sequence (weighted if needed)
+            has_weights = any(w != 1 for _, w in elements)
+            if has_weights:
+                inner = _weighted_sequence(elements)
+            else:
+                if len(elements) == 1:
+                    inner = elements[0][0]
+                else:
+                    inner = _sequence(*[p for p, _ in elements])
+            
+            # Slow by total weight so it spans that many cycles
+            if total_weight > 1:
+                return inner.slow(total_weight)
+            return inner
         
         else:
             # Unknown token, skip
@@ -2251,6 +2336,9 @@ def note(pattern_str: str, c=4, root=60, parent=None, mute=False, bus_name=None)
     chain._cycle_beats = c
     chain._parent_voice = parent
     
+    # Expose parent voice in state (if provided)
+    chain._state['parentVoice'] = parent
+    
     # Register to bus if name provided
     if bus_name:
         voice_id = bus(bus_name).register(chain)
@@ -2322,6 +2410,9 @@ def _midi_n(self, pattern_str: str, c=4, mute=False, bus_name=None) -> 'PatternC
     chain._root = self.note  # Use incoming MIDI note as root
     chain._cycle_beats = c
     chain._parent_voice = self.parentVoice
+    
+    # Expose parent voice in state
+    chain._state['parentVoice'] = self.parentVoice
     
     # Initialize bus registration tracking on MIDI wrapper if needed
     if not hasattr(self, '_bus_registrations'):
