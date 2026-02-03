@@ -521,14 +521,53 @@ def onTick():
 
 #### Mini-Notation Syntax
 
+**Basic Operators:**
+
 | Syntax | Description | Example |
 |--------|-------------|---------|
 | `a b c` | Sequence (subdivided evenly) | `"60 62 64"` - 3 notes per cycle |
 | `[a b]` | Subdivision group | `"60 [61 62] 63"` - middle slot split |
-| `<a b c>` | Alternation (one per cycle) | `"<60 62 64>"` - cycles through notes |
+| `<a b c>` | Weighted sequence | `"<0@2 1 2 3>"` - 0 gets 2/5 time |
 | `*n` | Fast (repeat n times) | `"60*4"` - note 4x per cycle |
 | `/n` | Slow (span n cycles) | `"60/2"` - note spans 2 cycles |
 | `~` or `-` | Rest (silence) | `"60 ~ 62 ~"` - notes with gaps |
+
+**Advanced Operators:**
+
+| Syntax | Description | Example |
+|--------|-------------|---------|
+| `@n` | Weighting (elongation) | `"0@2 1"` - 0 gets 2/3, 1 gets 1/3 |
+| `!n` | Replicate n times | `"0!3"` - plays 0 three times in slot |
+| `?` / `?p` | Degrade (probability) | `"0?"` - 50% chance, `"0?0.75"` - 75% |
+| `a, b` | Polyphony (stack) | `"0, 4, 7"` - play all simultaneously |
+
+**Weighting (`@`)**: Within a sequence, `@n` gives an element n times its normal time share:
+```python
+tc.n("0@2 1")      # 0 gets 2/3 duration, 1 gets 1/3
+tc.n("0 1@3 2")    # 0=1/5, 1=3/5, 2=1/5
+tc.n("0@0 1 2")    # 0 removed (zero weight), 1 and 2 split evenly
+```
+
+**Replicate (`!`)**: Repeats an element n times within its time slot:
+```python
+tc.n("0!3")        # Three quick notes in one cycle
+tc.n("0!3 1")      # Three 0s in first half, one 1 in second half
+tc.n("[0 1]!2")    # Pattern [0 1] plays twice
+```
+
+**Degrade (`?`)**: Probabilistically drops events (deterministic per cycle):
+```python
+tc.n("0?")         # 50% chance of playing
+tc.n("0?0.75")     # 75% chance of playing  
+tc.n("0 1? 2 3?")  # 1 and 3 are random, 0 and 2 always play
+```
+
+**Polyphony (`,`)**: Layer patterns to play simultaneously:
+```python
+tc.n("0, 4, 7")           # Major chord (all notes together)
+tc.n("0 1 2, 7 8 9")      # Two parallel sequences
+tc.n("[0 1]*2, 3@2 4")    # Complex layering with modifiers
+```
 
 #### Relative Patterns with Root
 Values are treated as offsets from `root` (default 60 = C4):
@@ -587,11 +626,20 @@ tc.n("60 ~ ~ 60 ~ 60 ~ ~", c=8)  # 3 hits over 8 slots
 # Fast arpeggio
 tc.n("0 3 5 7", c=1)  # Full arpeggio in 1 beat
 
-# Slow chord progression
-tc.n("<0 3 5>", c=4)  # One note per bar, cycles through
+# Weighted sequence
+tc.n("<0@2 1 2 3>", c=4)  # 0 lasts twice as long as others
 
 # Complex rhythm
 tc.n("60 [61 62]*2 ~ 63", c=4)  # Subdivision with fast modifier
+
+# Polyphonic arpeggio with random notes
+tc.n("0 3 5 7, 12?", c=4)  # Arpeggio + random octave layer
+
+# Replicated pattern with weighting
+tc.n("[0 3 5]!2, 7@2 12", c=4)  # Arp x2 layered with weighted bass
+
+# Probability-based variation
+tc.n("0 3? 5 7?", c=2)  # Root and 5th always, 3rd and 7th random
 ```
 
 Call `tc.exports.update()` in `onTick()` to push export values. Use unique `par_name` for attribute access. For full code, see TrapCode.py.

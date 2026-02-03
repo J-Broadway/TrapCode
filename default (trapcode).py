@@ -2,8 +2,6 @@
 import flvfx as vfx
 import trapcode as tc
 
-tc.debug('True')
-
 def createDialog():
     ui = tc.UI()
     # Add controls here
@@ -12,11 +10,9 @@ def createDialog():
 
 def onTriggerVoice(incomingVoice):
     midi = tc.MIDI(incomingVoice)
-    midi.n("<0@2 1 2 3>", c=2)
-    # midi.trigger()
+    midi.trigger()
 
 def onReleaseVoice(incomingVoice):
-    tc.stop_patterns_for_voice(incomingVoice)
     for v in vfx.context.voices:
         if tc.get_parent(v) == incomingVoice:
             v.release()

@@ -903,7 +903,20 @@ class Fraction:
                 n, d = numerator.split('/')
                 numerator, denominator = int(n), int(d)
             else:
-                numerator = int(float(numerator))
+                # Handle decimal strings like "0.5" -> Fraction(1, 2)
+                f = float(numerator)
+                if f != int(f):
+                    # Convert decimal to fraction: find power of 10 needed
+                    s = numerator.rstrip('0')  # Remove trailing zeros
+                    if '.' in s:
+                        decimal_places = len(s) - s.index('.') - 1
+                        scale = 10 ** decimal_places
+                        numerator = int(round(f * scale))
+                        denominator = scale
+                    else:
+                        numerator = int(f)
+                else:
+                    numerator = int(f)
         n, d = int(numerator), int(denominator)
         if d == 0:
             raise ZeroDivisionError("Fraction denominator cannot be zero")
@@ -1053,6 +1066,10 @@ _TOKEN_SPEC = [
     ('RANGLE',  r'>'),
     ('STAR',    r'\*'),
     ('SLASH',   r'/'),
+    ('AT',      r'@'),              # Weighting
+    ('BANG',    r'!'),              # Replicate
+    ('QUESTION', r'\?'),            # Degrade
+    ('COMMA',   r','),              # Polyphony
     ('WS',      r'\s+'),
 ]
 
@@ -1153,6 +1170,36 @@ class Pattern:
         Expands time: the pattern spans `factor` cycles.
         """
         return self.fast(Fraction(1) / Fraction(factor))
+    
+    def degrade(self, probability: float = 0.5) -> 'Pattern':
+        """
+        Randomly drop events with given probability of keeping them.
+        
+        Args:
+            probability: Chance of keeping the event (0.0 to 1.0)
+        
+        Determinism: Uses a hash-based seed from event timing and value,
+        so the same pattern at the same cycle always produces the same result.
+        """
+        outer_self = self
+        
+        def query(arc: Arc) -> List[Event]:
+            events = outer_self.query(arc)
+            result = []
+            for e in events:
+                # Seed based on event's whole start time for determinism
+                if e.whole:
+                    seed = hash((float(e.whole[0]), e.value))
+                else:
+                    seed = hash((float(e.part[0]), e.value))
+                
+                # Deterministic random check using LCG
+                rand_val = ((seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff
+                if rand_val < probability:
+                    result.append(e)
+            return result
+        
+        return Pattern(query)
     
     # --- Playback control ---
     def start(self, current_tick: int = None):
@@ -1334,6 +1381,99 @@ def _slowcat(*patterns) -> Pattern:
     return Pattern(query)
 
 
+def _stack(*patterns) -> Pattern:
+    """
+    Layer patterns for simultaneous playback (polyphony).
+    
+    All patterns are queried with the same arc, results merged.
+    "a, b" plays both a and b at the same time.
+    """
+    if not patterns:
+        return Pattern.silence()
+    if len(patterns) == 1:
+        return patterns[0]
+    
+    def query(arc: Arc) -> List[Event]:
+        results = []
+        for pat in patterns:
+            results.extend(pat.query(arc))
+        return results
+    
+    return Pattern(query)
+
+
+def _weighted_sequence(elements: List[Tuple[Pattern, int]]) -> Pattern:
+    """
+    Like _sequence(), but with weighted time allocation.
+    
+    Args:
+        elements: List of (pattern, weight) tuples
+    
+    Example:
+        "a@2 b" gives a 2/3 of the time, b 1/3
+        "a b@3 c" gives a=1/5, b=3/5, c=1/5
+    """
+    if not elements:
+        return Pattern.silence()
+    
+    total_weight = sum(w for _, w in elements)
+    if total_weight == 0:
+        return Pattern.silence()
+    
+    # Pre-calculate cumulative positions
+    positions = []
+    cumulative = Fraction(0)
+    for pat, weight in elements:
+        start = cumulative
+        end = cumulative + Fraction(weight, total_weight)
+        positions.append((pat, start, end))
+        cumulative = end
+    
+    def query(arc: Arc) -> List[Event]:
+        results = []
+        cycle_start = int(arc[0])
+        cycle_end = int(arc[1]) if arc[1] == int(arc[1]) else int(arc[1]) + 1
+        
+        for pat, child_start, child_end in positions:
+            child_duration = child_end - child_start
+            if child_duration == 0:
+                continue  # Skip zero-weight elements
+            
+            for c in range(cycle_start, cycle_end):
+                # This child's absolute time slot in cycle c
+                slot_start = Fraction(c) + child_start
+                slot_end = Fraction(c) + child_end
+                
+                # Intersect with query arc
+                query_start = max(arc[0], slot_start)
+                query_end = min(arc[1], slot_end)
+                
+                if query_start < query_end:
+                    # Transform to child's local time (0-1 within its slot)
+                    # Inverse of the slot mapping
+                    scale = Fraction(1) / child_duration
+                    local_start = (query_start - slot_start) * scale + Fraction(c)
+                    local_end = (query_end - slot_start) * scale + Fraction(c)
+                    
+                    child_events = pat.query((local_start, local_end))
+                    
+                    # Transform results back to parent time
+                    for e in child_events:
+                        new_whole = None
+                        if e.whole:
+                            w_start = slot_start + (e.whole[0] - Fraction(c)) * child_duration
+                            w_end = slot_start + (e.whole[1] - Fraction(c)) * child_duration
+                            new_whole = (w_start, w_end)
+                        p_start = slot_start + (e.part[0] - Fraction(c)) * child_duration
+                        p_end = slot_start + (e.part[1] - Fraction(c)) * child_duration
+                        new_part = (p_start, p_end)
+                        results.append(Event(e.value, new_whole, new_part))
+        
+        return results
+    
+    return Pattern(query)
+
+
 # -----------------------------
 # Mini-Notation Parser
 # -----------------------------
@@ -1359,45 +1499,85 @@ class _MiniParser:
         return tok
     
     def parse(self) -> Pattern:
-        """Parse the full pattern."""
-        return self.parse_layer()
+        """
+        Parse the full pattern.
+        pattern ::= layer (',' layer)*
+        """
+        layers = [self.parse_layer()]
+        
+        while self.peek() and self.peek().type == 'COMMA':
+            self.consume('COMMA')
+            layers.append(self.parse_layer())
+        
+        if len(layers) == 1:
+            return layers[0]
+        
+        return _stack(*layers)
     
     def parse_layer(self) -> Pattern:
         """
-        Parse a sequence of elements.
+        Parse a sequence of weighted elements.
         layer ::= element+
         """
-        elements = []
-        while self.peek() and self.peek().type not in ('RBRACK', 'RANGLE'):
+        elements = []  # List of (pattern, weight) tuples
+        while self.peek() and self.peek().type not in ('RBRACK', 'RANGLE', 'COMMA'):
             elements.append(self.parse_element())
         
         if not elements:
             return Pattern.silence()
-        if len(elements) == 1:
-            return elements[0]
         
-        return _sequence(*elements)
+        # Check if any element has non-default weight
+        has_weights = any(w != 1 for _, w in elements)
+        
+        if has_weights:
+            return _weighted_sequence(elements)
+        else:
+            # Use original sequence for efficiency (extract patterns from tuples)
+            if len(elements) == 1:
+                return elements[0][0]
+            return _sequence(*[p for p, _ in elements])
     
-    def parse_element(self) -> Pattern:
+    def parse_element(self) -> Tuple[Pattern, int]:
         """
-        Parse an atom with optional modifiers.
+        Parse an atom with optional modifiers, return (pattern, weight).
         element ::= atom (modifier)*
         """
         pat = self.parse_atom()
+        weight = 1  # Default weight
         
         # Consume modifiers
-        while self.peek() and self.peek().type in ('STAR', 'SLASH'):
+        while self.peek() and self.peek().type in ('STAR', 'SLASH', 'AT', 'BANG', 'QUESTION'):
             tok = self.consume()
-            # Next token must be a number
-            num_tok = self.consume('NUMBER')
-            num = Fraction(num_tok.value)
             
-            if tok.type == 'STAR':
-                pat = pat.fast(num)
-            elif tok.type == 'SLASH':
-                pat = pat.slow(num)
+            if tok.type == 'QUESTION':
+                # ? has optional probability argument
+                if self.peek() and self.peek().type == 'NUMBER':
+                    prob = float(self.consume().value)
+                else:
+                    prob = 0.5  # Default probability
+                pat = pat.degrade(prob)
+            else:
+                # STAR, SLASH, AT, BANG all require a number
+                num_tok = self.consume('NUMBER')
+                
+                if tok.type == 'STAR':
+                    # *n accepts float for fractional speed
+                    pat = pat.fast(Fraction(num_tok.value))
+                elif tok.type == 'SLASH':
+                    # /n accepts float for fractional slow
+                    pat = pat.slow(Fraction(num_tok.value))
+                elif tok.type == 'AT':
+                    # @n weight must be int
+                    weight = int(float(num_tok.value))
+                elif tok.type == 'BANG':
+                    # !n replication must be int
+                    num = int(float(num_tok.value))
+                    if num > 0:
+                        pat = _sequence(*[pat] * num)
+                    else:
+                        pat = Pattern.silence()
         
-        return pat
+        return (pat, weight)
     
     def parse_atom(self) -> Pattern:
         """
@@ -1428,16 +1608,16 @@ class _MiniParser:
             return inner
         
         elif tok.type == 'LANGLE':
-            # Alternation: <a b c>
+            # Alternation: <a b c> — each alternative is a full layer (sequence)
+            # This allows weighted sequences inside: <0@2 1 2 3> means
+            # one layer with 0 getting 2/5 time, others 1/5 each
             self.consume('LANGLE')
-            alternatives = []
-            while self.peek() and self.peek().type != 'RANGLE':
-                alternatives.append(self.parse_element())
+            # Parse the entire contents as a single layer
+            inner = self.parse_layer()
             self.consume('RANGLE')
             
-            if not alternatives:
-                return Pattern.silence()
-            return _slowcat(*alternatives)
+            # Wrap in slowcat so it cycles through (even single layer works)
+            return _slowcat(inner)
         
         else:
             # Unknown token, skip

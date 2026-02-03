@@ -546,7 +546,4 @@ _TOKEN_SPEC = [
 
 ## Next Steps After Phase 1.1
 
-1. Object syntax `{v=100, p=0.5}` — per-note property overrides
-2. Chained methods `.v()`, `.pan()` — polyrhythmic modulation
-3. Euclidean rhythms `(k,n)`
-4. Random choice `a|b`
+1. Common functions IE .add() .scale()
