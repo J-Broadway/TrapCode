@@ -1,4 +1,4 @@
-# TrapCode Tier 2 Operators Test
+# TrapCode Phase 1.2: Note Representations Test
 import flvfx as vfx
 import trapcode as tc
 
@@ -12,28 +12,43 @@ def createDialog():
 def onTriggerVoice(incomingVoice):
     midi = tc.MIDI(incomingVoice)
     
-    # === TEST CASES FOR TIER 2 OPERATORS ===
+    # === TEST CASES FOR NOTE REPRESENTATIONS ===
     
-    # 1. Weighting (@): a@2 b gives 'a' 2/3 of the time, 'b' 1/3
-    # midi.n("0@2 7", c=tc.par.Cycle)  # Long root, short octave
+    # 1. Basic note names (absolute MIDI values)
+    # midi.n("c4 d4 e4 f4", c=tc.par.Cycle)  # C major scale: 60, 62, 64, 65
     
-    # 2. Replicate (!): a!3 plays 'a' three times in its slot
-    # midi.n("0!3 7", c=tc.par.Cycle)  # Three root notes, then octave
+    # 2. Accidentals (sharps and flats)
+    # midi.n("c4 c#4 d4 eb4", c=tc.par.Cycle)  # Chromatic: 60, 61, 62, 63
     
-    # 3. Degrade (?): a? plays 'a' 50% of the time (deterministic)
-    # midi.n("0 3? 5 7?", c=tc.par.Cycle)  # Root always, 3rd/7th random
+    # 3. Default octave (3 when not specified)
+    # midi.n("c d e f", c=tc.par.Cycle)  # Octave 3: 48, 50, 52, 53
     
-    # 4. Polyphony (,): a, b plays both simultaneously
-    # midi.n("0, 4, 7", c=tc.par.Cycle)  # Major chord
+    # 4. Different octaves
+    # midi.n("c3 c4 c5 c6", c=tc.par.Cycle)  # 48, 60, 72, 84
     
-    # 5. Combined: weighted polyphonic arpeggio
-    # midi.n("0@2 3, 7@2 12", c=tc.par.Cycle)  # Two voices with weighting
+    # 5. Chords with note names (polyphony)
+    # midi.n("[c4, e4, g4]", c=tc.par.Cycle)  # C major chord
     
-    # 6. Nested: replicated subdivision with degrade
-    # midi.n("[0 3 5]!2, 12?", c=tc.par.Cycle)  # Arp x2 + random octave
+    # 6. Chord progression
+    # midi.n("<[c4,e4,g4] [d4,f4,a4] [e4,g4,b4] [f4,a4,c5]>", c=tc.par.Cycle)
+    
+    # 7. Mixed absolute (notes) and relative (numbers)
+    # midi.n("c4 0 4 7", c=tc.par.Cycle)  # c4=60, then root+0, root+4, root+7
+    
+    # 8. Note names with modifiers
+    # midi.n("c4*2 e4 g4", c=tc.par.Cycle)  # c4 fast, then e4, g4
+    # midi.n("c4@2 e4 g4", c=tc.par.Cycle)  # c4 weighted (2/4 time)
+    # midi.n("c4 e4? g4", c=tc.par.Cycle)   # e4 50% chance
+    
+    # 9. Stacked accidentals (double sharp/flat)
+    # midi.n("c4 c##4 d4 dbb4", c=tc.par.Cycle)  # 60, 62, 62, 60
+    
+    # 10. Arpeggio with note names
+    # midi.n("[c4 e4 g4 c5]", c=tc.par.Cycle)  # C major arpeggio
     
     # === ACTIVE TEST (uncomment one above or use this) ===
-    midi.n("0@2 3 5, 7!2 12?", c=tc.par.Cycle)
+    # Em - Am - Bm - Em/G chord progression
+    midi.n("<[g3,b3,e4] [a3,c4,e4] [b3,d4,f#4] [b3,e4,g4]>", c=tc.par.Cycle)
 
 def onReleaseVoice(incomingVoice):
     tc.stop_patterns_for_voice(incomingVoice)

@@ -521,16 +521,38 @@ def onTick():
 
 #### Mini-Notation Syntax
 
+**Note Names:**
+
+Use standard music notation instead of MIDI numbers:
+
+| Component | Description | Examples |
+|-----------|-------------|----------|
+| Letter | Note letter (case-insensitive) | `c`, `C`, `d`, `D` |
+| Accidentals | `#` = sharp, `b` = flat (can stack) | `c#`, `eb`, `f##`, `dbb` |
+| Octave | Optional, defaults to 3 | `c4`, `eb5`, `c` (= c3) |
+
+```python
+tc.n("c4 d4 e4 f4")     # C major scale: MIDI 60, 62, 64, 65
+tc.n("c#4 eb4 f##4")    # Accidentals: MIDI 61, 63, 67
+tc.n("c d e")           # Default octave 3: MIDI 48, 50, 52
+tc.n("[c4, e4, g4]")    # C major chord (3 simultaneous notes)
+```
+
+Note names produce **absolute** MIDI values (ignoring `root`), while numbers are **relative** offsets from `root`:
+```python
+tc.n("c4 0 4 7", root=60)  # c4=60 (absolute), then 60+0, 60+4, 60+7
+```
+
 **Basic Operators:**
 
 | Syntax | Description | Example |
 |--------|-------------|---------|
-| `a b c` | Sequence (subdivided evenly) | `"60 62 64"` - 3 notes per cycle |
-| `[a b]` | Subdivision group | `"60 [61 62] 63"` - middle slot split |
+| `a b c` | Sequence (subdivided evenly) | `"c4 d4 e4"` - 3 notes per cycle |
+| `[a b]` | Subdivision group | `"c4 [d4 e4] f4"` - middle slot split |
 | `<a b c>` | Weighted sequence | `"<0@2 1 2 3>"` - 0 gets 2/5 time |
-| `*n` | Fast (repeat n times) | `"60*4"` - note 4x per cycle |
-| `/n` | Slow (span n cycles) | `"60/2"` - note spans 2 cycles |
-| `~` or `-` | Rest (silence) | `"60 ~ 62 ~"` - notes with gaps |
+| `*n` | Fast (repeat n times) | `"c4*4"` - note 4x per cycle |
+| `/n` | Slow (span n cycles) | `"c4/2"` - note spans 2 cycles |
+| `~` or `-` | Rest (silence) | `"c4 ~ d4 ~"` - notes with gaps |
 
 **Advanced Operators:**
 
@@ -564,9 +586,16 @@ tc.n("0 1? 2 3?")  # 1 and 3 are random, 0 and 2 always play
 
 **Polyphony (`,`)**: Layer patterns to play simultaneously:
 ```python
-tc.n("0, 4, 7")           # Major chord (all notes together)
+tc.n("[c4, e4, g4]")      # C major chord (3 simultaneous notes)
+tc.n("0, 4, 7")           # Major chord using offsets
 tc.n("0 1 2, 7 8 9")      # Two parallel sequences
 tc.n("[0 1]*2, 3@2 4")    # Complex layering with modifiers
+```
+
+**Chord Progressions** with note names:
+```python
+# Em - Am - Bm - Em/G progression
+tc.n("<[g3,b3,e4] [a3,c4,e4] [b3,d4,f#4] [b3,e4,g4]>")
 ```
 
 #### Relative Patterns with Root
@@ -620,26 +649,35 @@ tc.n("60 62", c=1)        # 1 beat = quarter note total
 
 #### Advanced Examples
 ```python
+# Note name melody
+tc.n("c4 e4 g4 c5", c=4)  # C major arpeggio
+
+# Chord with note names
+tc.n("[c4, e4, g4]", c=4)  # C major chord
+
 # Euclidean-style pattern with rests
-tc.n("60 ~ ~ 60 ~ 60 ~ ~", c=8)  # 3 hits over 8 slots
+tc.n("c4 ~ ~ c4 ~ c4 ~ ~", c=8)  # 3 hits over 8 slots
 
 # Fast arpeggio
-tc.n("0 3 5 7", c=1)  # Full arpeggio in 1 beat
+tc.n("c4 e4 g4 c5", c=1)  # Full arpeggio in 1 beat
 
 # Weighted sequence
 tc.n("<0@2 1 2 3>", c=4)  # 0 lasts twice as long as others
 
 # Complex rhythm
-tc.n("60 [61 62]*2 ~ 63", c=4)  # Subdivision with fast modifier
+tc.n("c4 [d4 e4]*2 ~ f4", c=4)  # Subdivision with fast modifier
 
 # Polyphonic arpeggio with random notes
-tc.n("0 3 5 7, 12?", c=4)  # Arpeggio + random octave layer
+tc.n("c4 e4 g4 c5, c5?", c=4)  # Arpeggio + random high octave
 
 # Replicated pattern with weighting
-tc.n("[0 3 5]!2, 7@2 12", c=4)  # Arp x2 layered with weighted bass
+tc.n("[c4 e4 g4]!2, c3@2 c4", c=4)  # Arp x2 layered with weighted bass
 
 # Probability-based variation
-tc.n("0 3? 5 7?", c=2)  # Root and 5th always, 3rd and 7th random
+tc.n("c4 e4? g4 b4?", c=2)  # Root and 5th always, 3rd and 7th random
+
+# Mixed absolute and relative
+tc.n("c4 0 4 7", root=48)  # c4 absolute (60), then offsets from C3 (48)
 ```
 
 Call `tc.exports.update()` in `onTick()` to push export values. Use unique `par_name` for attribute access. For full code, see TrapCode.py.

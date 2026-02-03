@@ -1028,6 +1028,20 @@ class Event:
 
 
 # -----------------------------
+# AbsoluteNote Marker
+# -----------------------------
+@dataclass(frozen=True)
+class AbsoluteNote:
+    """
+    Marker for absolute MIDI values (from note names).
+    
+    Distinguishes note names (e.g., 'c4' -> AbsoluteNote(60)) from
+    numeric offsets (e.g., '0' -> int) at trigger time.
+    """
+    midi: int
+
+
+# -----------------------------
 # Time Conversion
 # -----------------------------
 def _ticks_to_time(ticks: int, ppq: int, cycle_beats: int) -> Time:
@@ -1049,6 +1063,98 @@ def _tick_arc(tick: int, ppq: int, cycle_beats: int) -> Arc:
 
 
 # -----------------------------
+# Note Name Parsing
+# -----------------------------
+
+# Chroma values for each note letter (C = 0)
+_CHROMAS = {'c': 0, 'd': 2, 'e': 4, 'f': 5, 'g': 7, 'a': 9, 'b': 11}
+
+# Accidental semitone offsets (# and s = sharp, b and f = flat)
+_ACCIDENTALS = {'#': 1, 'b': -1, 's': 1, 'f': -1}
+
+
+def _tokenize_note(note: str) -> tuple:
+    """
+    Parse note string into (letter, accidentals, octave).
+    
+    Returns:
+        (letter: str, accidentals: str, octave: int or None)
+    
+    Examples:
+        'c4' -> ('c', '', 4)
+        'eb5' -> ('e', 'b', 5)
+        'f##3' -> ('f', '##', 3)
+        'c' -> ('c', '', None)
+    """
+    if not note or not isinstance(note, str):
+        return (None, '', None)
+    
+    # Match: letter + accidentals + optional octave
+    match = re.match(r'^([a-gA-G])([#bsf]*)(-?\d*)$', note)
+    if not match:
+        return (None, '', None)
+    
+    letter = match.group(1).lower()
+    accidentals = match.group(2)
+    octave_str = match.group(3)
+    octave = int(octave_str) if octave_str else None
+    
+    return (letter, accidentals, octave)
+
+
+def _get_accidental_offset(accidentals: str) -> int:
+    """Sum of semitone offsets for accidentals string."""
+    return sum(_ACCIDENTALS.get(c, 0) for c in accidentals)
+
+
+def _note_to_midi(note: str, default_octave: int = 3) -> int:
+    """
+    Convert note name to MIDI number.
+    
+    Args:
+        note: Note string like 'c4', 'eb5', 'f##'
+        default_octave: Octave to use if not specified (default 3)
+    
+    Returns:
+        MIDI note number (0-127)
+    
+    Examples:
+        'c4' -> 60
+        'c#4' -> 61
+        'db4' -> 61
+        'c5' -> 72
+        'c' -> 48 (octave 3 default)
+    
+    Raises:
+        ValueError if note format is invalid
+    """
+    letter, accidentals, octave = _tokenize_note(note)
+    
+    if letter is None:
+        raise ValueError(f"Invalid note format: '{note}'")
+    
+    if octave is None:
+        octave = default_octave
+    
+    chroma = _CHROMAS[letter]
+    offset = _get_accidental_offset(accidentals)
+    
+    # MIDI formula: (octave + 1) * 12 + chroma + offset
+    midi = (octave + 1) * 12 + chroma + offset
+    
+    # Clamp to valid MIDI range
+    return _clamp(midi, 0, 127)
+
+
+def _is_note(value: str) -> bool:
+    """Check if string is a valid note name."""
+    if not isinstance(value, str):
+        return False
+    letter, _, _ = _tokenize_note(value)
+    return letter is not None
+
+
+# -----------------------------
 # Tokenizer
 # -----------------------------
 class Token(NamedTuple):
@@ -1059,6 +1165,7 @@ class Token(NamedTuple):
 
 _TOKEN_SPEC = [
     ('NUMBER',  r'-?\d+(\.\d+)?'),  # Negative or positive, optional decimal
+    ('NOTE',    r'[a-gA-G][#bsf]*-?\d*'),  # Note name: c, c#, eb4, f##5
     ('REST',    r'[~\-]'),          # ~ or standalone - (only matches if NUMBER didn't)
     ('LBRACK',  r'\['),
     ('RBRACK',  r'\]'),
@@ -1178,24 +1285,18 @@ class Pattern:
         Args:
             probability: Chance of keeping the event (0.0 to 1.0)
         
-        Determinism: Uses a hash-based seed from event timing and value,
-        so the same pattern at the same cycle always produces the same result.
+        Uses true randomness for natural variation. Each event is independently
+        evaluated with the given probability.
         """
+        import random
         outer_self = self
         
         def query(arc: Arc) -> List[Event]:
             events = outer_self.query(arc)
             result = []
             for e in events:
-                # Seed based on event's whole start time for determinism
-                if e.whole:
-                    seed = hash((float(e.whole[0]), e.value))
-                else:
-                    seed = hash((float(e.part[0]), e.value))
-                
-                # Deterministic random check using LCG
-                rand_val = ((seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff
-                if rand_val < probability:
+                # Use true randomness for natural musical variation
+                if random.random() < probability:
                     result.append(e)
             return result
         
@@ -1582,7 +1683,7 @@ class _MiniParser:
     def parse_atom(self) -> Pattern:
         """
         Parse a primitive value or grouped pattern.
-        atom ::= NUMBER | REST | '[' pattern ']' | '<' pattern+ '>'
+        atom ::= NUMBER | NOTE | REST | '[' pattern ']' | '<' pattern+ '>'
         """
         tok = self.peek()
         if tok is None:
@@ -1596,14 +1697,20 @@ class _MiniParser:
             else:
                 return Pattern.pure(int(tok.value))
         
+        elif tok.type == 'NOTE':
+            self.consume()
+            # Convert note name to MIDI, wrap in AbsoluteNote marker
+            midi = _note_to_midi(tok.value)
+            return Pattern.pure(AbsoluteNote(midi))
+        
         elif tok.type == 'REST':
             self.consume()
             return Pattern.pure(None)  # Rest
         
         elif tok.type == 'LBRACK':
-            # Subdivision: [a b c]
+            # Subdivision: [a b c] (allow commas for polyphony inside)
             self.consume('LBRACK')
-            inner = self.parse_layer()
+            inner = self.parse()
             self.consume('RBRACK')
             return inner
         
@@ -1666,8 +1773,14 @@ def _update_patterns():
         active_cycle_beats = pattern._latched_cycle_beats or cycle_beats
         
         for e in events:
-            # Create and trigger note
-            note_val = root + e.value if e.value is not None else None
+            # Resolve note value: AbsoluteNote is absolute, numbers are relative to root
+            if isinstance(e.value, AbsoluteNote):
+                note_val = e.value.midi  # Absolute MIDI from note name
+            elif isinstance(e.value, (int, float)):
+                note_val = root + e.value  # Relative offset from root
+            else:
+                note_val = None  # Rest or unknown
+            
             if note_val is not None:
                 # Calculate duration from event's whole span (use latched value)
                 if e.whole:
@@ -1813,7 +1926,14 @@ def _update_midi_patterns():
             _log("patterns", f"EVENT value={e.value} whole=({float(e.whole[0]):.4f}, {float(e.whole[1]):.4f}) part=({float(e.part[0]):.4f}, {float(e.part[1]):.4f}) has_onset={e.has_onset()}", level=2)
         
         for e in events:
-            note_val = root + e.value if e.value is not None else None
+            # Resolve note value: AbsoluteNote is absolute, numbers are relative to root
+            if isinstance(e.value, AbsoluteNote):
+                note_val = e.value.midi  # Absolute MIDI from note name
+            elif isinstance(e.value, (int, float)):
+                note_val = root + e.value  # Relative offset from root
+            else:
+                note_val = None  # Rest or unknown
+            
             if note_val is not None:
                 # Calculate duration from event's whole span (use latched cycle_beats)
                 if e.whole:
