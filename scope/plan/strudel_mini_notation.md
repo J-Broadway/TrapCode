@@ -342,43 +342,48 @@ if par.pattern_str.changed():
 
 ## Implementation Phases
 
-### Phase 1: Core Engine
-- [ ] `Event` dataclass (value, whole, part arcs)
-- [ ] `Event.has_onset()` method — returns True when `whole.begin == part.begin`
-- [ ] `Pattern` class with `query(arc)` method
-- [ ] `Pattern.pure(value)` — constant pattern (future-proofed for multi-cycle queries)
-- [ ] `Pattern.fast(n)` / `Pattern.slow(n)` — must transform both `whole` AND `part`
-- [ ] `sequence(*patterns)` — subdivision with proper time transformation
-- [ ] Time conversion: ticks ↔ Fraction-based cycle time
-- [ ] `tick_arc()` — 1-tick-wide query windows for fractional boundary handling
-- [ ] Internal tick counter (works when FL transport stopped)
-- [ ] `pattern.tick()` — query current tick arc, fire events where `has_onset() == True`
+### Phase 1: Core Engine ✅ COMPLETE
+- [x] `Event` dataclass (value, whole, part arcs)
+- [x] `Event.has_onset()` method — returns True when `whole.begin == part.begin`
+- [x] `Pattern` class with `query(arc)` method
+- [x] `Pattern.pure(value)` — constant pattern (future-proofed for multi-cycle queries)
+- [x] `Pattern.fast(n)` / `Pattern.slow(n)` — must transform both `whole` AND `part`
+- [x] `sequence(*patterns)` — subdivision with proper time transformation
+- [x] Time conversion: ticks ↔ Fraction-based cycle time
+- [x] `tick_arc()` — 1-tick-wide query windows for fractional boundary handling
+- [x] Internal tick counter (works when FL transport stopped)
+- [x] `pattern.tick()` — query current tick arc, fire events where `has_onset() == True`
+- [x] **Bonus:** Cycle-latched parameter updates for smooth dynamic `c` changes (risers)
+- [x] **Bonus:** Custom `Fraction` class to avoid FL Studio crash from stdlib fractions module
 
-### Phase 2: Parser (Tier 1 Operators + Object Syntax)
-- [ ] Tokenizer (regex-based, handles `-` as rest and `-3` as negative number)
-- [ ] Recursive descent parser
-- [ ] `[a b c]` subdivision
-- [ ] `<a b c>` alternation (simplified: 1-tick arcs never cross cycle boundaries)
-- [ ] `*n` and `/n` time scaling
-- [ ] `~` and `-` as rest (Strudel-compatible)
+### Phase 2: Parser (Tier 1 Operators) ✅ COMPLETE
+- [x] Tokenizer (regex-based, handles `-` as rest and `-3` as negative number)
+- [x] Recursive descent parser
+- [x] `[a b c]` subdivision
+- [x] `<a b c>` alternation (simplified: 1-tick arcs never cross cycle boundaries)
+- [x] `*n` and `/n` time scaling
+- [x] `~` and `-` as rest (Strudel-compatible)
 - [ ] Object syntax: `60{v=100, p=0.5}` with TrapCode aliases
 
-### Phase 3: Integration + Chained Methods
-- [ ] `tc.n()` entry point (standalone, origin = MIDI 60)
-- [ ] `midi.n()` method (origin = incoming note)
-- [ ] Connect events to `tc.Single.trigger()`
+### Phase 3: Integration + Chained Methods (Partial)
+- [x] `tc.n()` entry point (standalone, origin = MIDI 60)
+- [x] `midi.n()` method (origin = incoming note)
+- [x] Connect events to `tc.Note.trigger()` (Note, not Single — rename not done)
+- [x] Parent voice lifecycle (release pattern when parent releases via `tc.stop_patterns_for_voice()`)
+- [x] Dynamic `c` and `root` parameters accept UI wrappers
 - [ ] Respect `cut` behavior
-- [ ] Parent voice lifecycle (release pattern when parent releases)
 - [ ] Chained methods: `.v()`, `.pan()`, `.x()`, `.y()` for polyrhythmic modulation
 - [ ] Precedence: object syntax wins over chained methods
 
 ### Phase 4: Polish
 - [ ] Error messages with position info
-- [ ] `pattern.reset()` for manual sync
+- [x] `pattern.reset()` for manual sync
 - [ ] UI Text input hot-reload pattern
 
 ### Phase 5: Advanced Operators (Tier 2-3)
+- [ ] `@n` — weighting/elongation
 - [ ] Polyphony `,`
+- [ ] `!n` — replicate
 - [ ] Euclidean `(k,n)`
 - [ ] Probabilistic `?`
 - [ ] `.quantize()` — snap pattern start to beat grid
@@ -402,8 +407,15 @@ All pattern code should be placed in a distinct section marked with a separator 
 
 ## Next Steps
 
-1. Confirm answers to design questions above
-2. Prototype Phase 1 (core engine) in `scope.py`
-3. Test with simple patterns in FL Studio
-4. Add parser (Phase 2)
-5. Integrate fully (Phase 3)
+1. ~~Confirm answers to design questions above~~ ✅
+2. ~~Prototype Phase 1 (core engine) in `scope.py`~~ ✅
+3. ~~Test with simple patterns in FL Studio~~ ✅
+4. ~~Add parser (Phase 2)~~ ✅
+5. ~~Integrate fully (Phase 3)~~ ✅ (core integration done)
+
+### Remaining Work
+1. Object syntax: `60{v=100, p=0.5}` — per-note property overrides
+2. Chained methods: `.v()`, `.pan()`, `.x()`, `.y()` — polyrhythmic modulation
+3. `@n` weighting/elongation operator
+4. `cut` behavior integration
+5. Polish: error messages, UI Text hot-reload

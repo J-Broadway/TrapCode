@@ -38,14 +38,14 @@ Implement a working pattern engine with these operators:
 **Files:** `trapcode.py` (or prototype in `scope/scope.py` first)
 
 **Deliverables:**
-- [ ] `Time` type alias (`Fraction`)
-- [ ] `Arc` type alias (`tuple[Time, Time]`)
-- [ ] `Event` dataclass with fields:
+- [x] `Time` type alias (`Fraction`)
+- [x] `Arc` type alias (`tuple[Time, Time]`)
+- [x] `Event` dataclass with fields:
   - `value: Any` — MIDI note number (or None for rest)
   - `whole: Optional[Arc]` — original metric span (the "logical" event duration)
   - `part: Arc` — actual active time window (intersection with query arc)
-- [ ] `Event.has_onset()` method — returns `True` if `whole.begin == part.begin`
-- [ ] Basic `Pattern` class with `query(arc: Arc) -> list[Event]`
+- [x] `Event.has_onset()` method — returns `True` if `whole.begin == part.begin`
+- [x] Basic `Pattern` class with `query(arc: Arc) -> list[Event]`
 
 **Key Concept: `whole` vs `part`**
 
@@ -118,10 +118,10 @@ assert events[1].has_onset() == True  # onset at 1 is in query
 ### Step 2: Time Conversion Layer
 
 **Deliverables:**
-- [ ] `ticks_to_time(ticks: int, ppq: int, cycle_beats: int) -> Time`
-- [ ] `time_to_ticks(t: Time, ppq: int, cycle_beats: int) -> int`
-- [ ] `tick_arc(tick: int, ppq: int, cycle_beats: int) -> Arc` — returns 1-tick-wide query window
-- [ ] Module-level `_tickCount` that advances every `onTick()` call
+- [x] `ticks_to_time(ticks: int, ppq: int, cycle_beats: int) -> Time`
+- [x] `time_to_ticks(t: Time, ppq: int, cycle_beats: int) -> int`
+- [x] `tick_arc(tick: int, ppq: int, cycle_beats: int) -> Arc` — returns 1-tick-wide query window
+- [x] Module-level `_internal_tick` that advances every `update()` call
 
 **Key Concept: 1-Tick Query Windows**
 
@@ -155,10 +155,10 @@ assert arc == (Fraction(76, 384), Fraction(77, 384))
 ### Step 3: Tokenizer
 
 **Deliverables:**
-- [ ] `Token` namedtuple with `type`, `value`, `pos`
-- [ ] `tokenize(code: str) -> Iterator[Token]`
-- [ ] Token types: `NUMBER`, `LBRACK`, `RBRACK`, `LANGLE`, `RANGLE`, `STAR`, `SLASH`, `REST`, `WS`
-- [ ] Lookahead for `-`: `-\d` → NUMBER (negative), `-` alone → REST
+- [x] `Token` namedtuple with `type`, `value`, `pos`
+- [x] `tokenize(code: str) -> Iterator[Token]`
+- [x] Token types: `NUMBER`, `LBRACK`, `RBRACK`, `LANGLE`, `RANGLE`, `STAR`, `SLASH`, `REST`, `WS`
+- [x] Lookahead for `-`: `-\d` → NUMBER (negative), `-` alone → REST
 
 **Tokenizer regex (order matters):**
 ```python
@@ -199,11 +199,11 @@ assert [t.type for t in tokens] == ['NUMBER', 'REST', 'NUMBER']
 ### Step 4: Parser — Atoms Only
 
 **Deliverables:**
-- [ ] `MiniParser` class with `tokens`, `pos`, `peek()`, `consume()`
-- [ ] `parse_atom()` — handles:
+- [x] `MiniParser` class with `tokens`, `pos`, `peek()`, `consume()`
+- [x] `parse_atom()` — handles:
   - Numbers → `Pattern.pure(int(value))`
   - `~` → `Pattern.pure(None)` (rest)
-- [ ] `parse_layer()` — sequence of atoms, subdivided evenly
+- [x] `parse_layer()` — sequence of atoms, subdivided evenly
 
 **Test:** Parse simple sequences without brackets/modifiers.
 
@@ -221,8 +221,8 @@ assert [e.value for e in events] == [60, 61, 62]
 ### Step 5: Parser — Subdivision `[a b c]`
 
 **Deliverables:**
-- [ ] `parse_atom()` handles `[` → recursive `parse()` → `]`
-- [ ] `sequence(*patterns)` / `fastcat(*patterns)` function — squeezes children evenly into one cycle
+- [x] `parse_atom()` handles `[` → recursive `parse()` → `]`
+- [x] `sequence(*patterns)` / `fastcat(*patterns)` function — squeezes children evenly into one cycle
 
 **How Subdivision Works:**
 
@@ -318,8 +318,8 @@ assert events[3].whole == (Fraction(2, 3), Fraction(1))
 ### Step 6: Parser — Alternation `<a b c>`
 
 **Deliverables:**
-- [ ] `parse_atom()` handles `<` → parse alternatives → `>`
-- [ ] Alternation selects one child per cycle based on `floor(arc.start) % n`
+- [x] `parse_atom()` handles `<` → parse alternatives → `>`
+- [x] Alternation selects one child per cycle based on `floor(arc.start) % n`
 
 **Simplification (Option A):** Since VFX Script uses 1-tick query windows that never span cycle boundaries, we can use a simple implementation:
 
@@ -358,10 +358,10 @@ assert events[0].value == 60
 ### Step 7: Parser — Modifiers `*n` and `/n`
 
 **Deliverables:**
-- [ ] `parse_element()` — parses atom then consumes modifiers
-- [ ] `*n` → `pattern.fast(n)` — compress time by factor n
-- [ ] `/n` → `pattern.slow(n)` — expand time by factor n
-- [ ] `Pattern.fast(n)` and `Pattern.slow(n)` methods
+- [x] `parse_element()` — parses atom then consumes modifiers
+- [x] `*n` → `pattern.fast(n)` — compress time by factor n
+- [x] `/n` → `pattern.slow(n)` — expand time by factor n
+- [x] `Pattern.fast(n)` and `Pattern.slow(n)` methods
 
 **How `fast` and `slow` work:**
 
@@ -450,11 +450,12 @@ assert events[0].has_onset() == False  # whole.begin (0) != part.begin (1)
 ### Step 8: Pattern.tick() Integration
 
 **Deliverables:**
-- [ ] `Pattern.tick(current_tick, ppq, cycle_beats)` method — queries 1-tick arc, returns onset events
-- [ ] `Pattern.start()`, `Pattern.stop()`, `Pattern.reset()` methods
-- [ ] `_running` and `_startTick` state per pattern
-- [ ] Events with `value=None` (rests) are skipped, not triggered
-- [ ] Only events where `has_onset() == True` are returned (avoids duplicate triggers)
+- [x] `Pattern.tick(current_tick, ppq, cycle_beats)` method — queries 1-tick arc, returns onset events
+- [x] `Pattern.start()`, `Pattern.stop()`, `Pattern.reset()` methods
+- [x] `_running` and `_start_tick` state per pattern
+- [x] Events with `value=None` (rests) are skipped, not triggered
+- [x] Only events where `has_onset() == True` are returned (avoids duplicate triggers)
+- [x] **Bonus:** Cycle-latched parameter updates for smooth dynamic `cycle_beats` changes
 
 **Implementation:**
 
@@ -515,11 +516,11 @@ assert len(fired) == 5  # All 5 notes fire exactly once
 ### Step 9: tc.n() Entry Point
 
 **Deliverables:**
-- [ ] `tc.note(pattern_str, c=4, root=60)` function
-- [ ] `tc.n` as alias for `tc.note`
-- [ ] `c` / `cycle` parameter for cycle duration in beats
-- [ ] `root` parameter for origin note (default 60 for standalone)
-- [ ] Values in pattern are offsets from `root`
+- [x] `tc.note(pattern_str, c=4, root=60)` function
+- [x] `tc.n` as alias for `tc.note`
+- [x] `c` / `cycle` parameter for cycle duration in beats (supports dynamic UI wrappers)
+- [x] `root` parameter for origin note (default 60 for standalone, supports dynamic UI wrappers)
+- [x] Values in pattern are offsets from `root`
 
 **Test:** Full integration test.
 
@@ -538,10 +539,11 @@ def onTick():
 ### Step 10: midi.n() Method
 
 **Deliverables:**
-- [ ] `MIDI.n(pattern_str, c=4)` method
-- [ ] Uses `self.note` as root (incoming MIDI note)
-- [ ] Pattern lifecycle tied to parent voice
-- [ ] First event fires immediately on `midi.trigger()`
+- [x] `MIDI.n(pattern_str, c=4)` method
+- [x] Uses `self.note` as root (incoming MIDI note)
+- [x] Pattern lifecycle tied to parent voice (via `tc.stop_patterns_for_voice()`)
+- [x] `c` parameter supports dynamic UI wrappers for real-time control
+- [x] First event fires immediately (pattern starts at current tick, processed same frame)
 
 **Test:** Voice-bound pattern in `onTriggerVoice`.
 
@@ -571,14 +573,15 @@ def onTriggerVoice(incomingVoice):
 
 ## Success Criteria
 
-- [ ] `tc.n("60 62 64 65", c=4)` plays 4 quarter notes over 1 bar
-- [ ] `tc.n("60 [61 62] 63")` correctly subdivides middle element
-- [ ] `tc.n("<60 62 64>")` alternates notes each cycle
-- [ ] `tc.n("60*4")` plays note 4 times per cycle
-- [ ] `tc.n("60/2")` stretches note across 2 cycles
-- [ ] `tc.n("60 ~ 62 ~")` plays notes 60 and 62, skips rests
-- [ ] `midi.n("0 3 5 7")` creates arpeggio from incoming note
-- [ ] Patterns work when FL transport is stopped (internal tick counter)
+- [x] `tc.n("60 62 64 65", c=4)` plays 4 quarter notes over 1 bar
+- [x] `tc.n("60 [61 62] 63")` correctly subdivides middle element
+- [x] `tc.n("<60 62 64>")` alternates notes each cycle
+- [x] `tc.n("60*4")` plays note 4 times per cycle
+- [x] `tc.n("60/2")` stretches note across 2 cycles
+- [x] `tc.n("60 ~ 62 ~")` plays notes 60 and 62, skips rests
+- [x] `midi.n("0 3 5 7")` creates arpeggio from incoming note
+- [x] Patterns work when FL transport is stopped (internal tick counter)
+- [x] **Bonus:** Dynamic `c` parameter with cycle-latched updates for smooth risers
 
 ---
 
