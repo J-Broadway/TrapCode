@@ -462,7 +462,7 @@ assert len(events) == 5
 
 Recommended order based on dependencies and complexity:
 
-### Step 1: Tokenizer Updates
+### Step 1: Tokenizer Updates ✓
 Add all new token types:
 
 ```python
@@ -483,22 +483,22 @@ _TOKEN_SPEC = [
 ]
 ```
 
-### Step 2: Polyphony `,` (Simplest)
+### Step 2: Polyphony `,` (Simplest) ✓
 - Add `stack()` combinator
 - Update `parse()` to handle comma-separated layers
 - Test with simple patterns
 
-### Step 3: Replicate `!n` (Simple)
+### Step 3: Replicate `!n` (Simple) ✓
 - Modify `parse_element()` to handle `!n`
 - Reuses existing `_sequence()` function
 - Test with atoms and grouped patterns
 
-### Step 4: Degrade `?` (Medium)
+### Step 4: Degrade `?` (Medium) ✓
 - Add `Pattern.degrade()` method
 - Update parser for optional probability argument
 - Test determinism
 
-### Step 5: Weighting `@n` (Complex)
+### Step 5: Weighting `@n` (Complex) ✓
 - Add `weighted_sequence()` combinator
 - Modify `parse_element()` to return (pattern, weight)
 - Update `parse_layer()` to handle weighted elements
@@ -508,25 +508,25 @@ _TOKEN_SPEC = [
 
 ## Success Criteria
 
-- [ ] `"0@2 1"` gives 0 twice the duration of 1
-- [ ] `"0!3"` plays note 0 three times in one cycle
-- [ ] `"0?"` plays note 0 approximately 50% of the time (deterministically)
-- [ ] `"0, 1"` plays both notes simultaneously
-- [ ] `"[0 1]!2, 2@2 3"` combines all operators correctly
-- [ ] All operators work with `midi.n()` voice-bound patterns
-- [ ] Dynamic `c` parameter still works with new operators
+- [x] `"0@2 1"` gives 0 twice the duration of 1
+- [x] `"0!3"` plays note 0 three times in one cycle
+- [x] `"0?"` plays note 0 approximately 50% of the time (deterministically)
+- [x] `"0, 1"` plays both notes simultaneously
+- [x] `"[0 1]!2, 2@2 3"` combines all operators correctly
+- [x] All operators work with `midi.n()` voice-bound patterns
+- [x] Dynamic `c` parameter still works with new operators
 
 ---
 
 ## Edge Cases to Handle
 
-1. **`@0` removes element** — zero-weight elements should be skipped
-2. **`!0` silences element** — replicate zero times = silence
-3. **`?0` never plays** — 0% probability = always filtered
-4. **`?1` always plays** — 100% probability = no filtering
-5. **Nested operators** — `[0@2 1]!3` should work correctly
-6. **Empty layers** — `0, , 1` should handle gracefully
-7. **Whitespace** — `0 , 1` vs `0,1` should be equivalent
+1. **`@0` removes element** — zero-weight elements should be skipped ✓
+2. **`!0` silences element** — replicate zero times = silence ✓
+3. **`?0` never plays** — 0% probability = always filtered ✓
+4. **`?1` always plays** — 100% probability = no filtering ✓
+5. **Nested operators** — `[0@2 1]!3` should work correctly ✓
+6. **Empty layers** — `0, , 1` should handle gracefully ✓
+7. **Whitespace** — `0 , 1` vs `0,1` should be equivalent ✓
 
 ---
 
