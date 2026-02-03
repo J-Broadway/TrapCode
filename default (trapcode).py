@@ -10,9 +10,11 @@ def createDialog():
 
 def onTriggerVoice(incomingVoice):
     midi = tc.MIDI(incomingVoice)
-    midi.trigger()
+    tc.n("0 3 5 <3 5>", c=4)
+    # midi.trigger()
 
 def onReleaseVoice(incomingVoice):
+    tc.stop_patterns_for_voice(incomingVoice)
     for v in vfx.context.voices:
         if tc.get_parent(v) == incomingVoice:
             v.release()

@@ -1,1 +1,2 @@
 - Consolodate tc.exports.update() into tc.update() to reduce boilerplate
+- midi.n(f"<c4 c#4 d4 eb4>/{tc.par.Cycle}") should work similar to midi.n(f"<c4 c#4 d4 eb4>", c=tc.par.Cycle) in that value is grabbed after ervery cycle to refresh speed
