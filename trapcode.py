@@ -1352,6 +1352,11 @@ class Pattern:
         if cycle_beats < 0.01:
             cycle_beats = 0.01
         
+        # Snap to nearest integer if very close (fixes float precision from UI knobs)
+        rounded = round(cycle_beats)
+        if abs(cycle_beats - rounded) < 0.001:
+            cycle_beats = float(rounded)
+        
         # Handle first tick: latch initial cycle_beats
         if self._last_tick is None:
             self._last_tick = current_tick
