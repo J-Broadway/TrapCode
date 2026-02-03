@@ -681,3 +681,192 @@ tc.n("c4 0 4 7", root=48)  # c4 absolute (60), then offsets from C3 (48)
 ```
 
 Call `tc.exports.update()` in `onTick()` to push export values. Use unique `par_name` for attribute access. For full code, see TrapCode.py.
+
+### 14. Bus System (Pattern State Access)
+Register patterns to named buses for cross-scope state access. This enables using patterns as programmable state machines—sequencing logic, not just notes.
+
+#### Two Entry Points
+
+**Voice-Scoped (`midi.n()`)**: Patterns are automatically tied to the incoming voice lifecycle:
+```python
+def onTriggerVoice(incomingVoice):
+    midi = tc.MIDI(incomingVoice)
+    midi.n("<0 1 2 3>", c=4, bus='melody')  # Register to 'melody' bus
+
+def onReleaseVoice(incomingVoice):
+    tc.stop_patterns_for_voice(incomingVoice)  # Auto-cleanup
+```
+
+**Standalone (`tc.n()`)**: Patterns can be tied to a parent voice or persist until `.stop()`:
+```python
+# Tied to voice lifecycle
+def onTriggerVoice(v):
+    tc.n("<0 3 5>", c=4, parent=v, bus='melody')
+
+# Persistent (manual cleanup required)
+_clock = None
+def onTick():
+    global _clock
+    if _clock is None:
+        _clock = tc.n("<0 1 2 3>", c=1, mute=True, bus='clock')
+    tc.update()
+
+# Manual cleanup
+_clock.stop()
+```
+
+#### Ghost Patterns (State-Only)
+
+Use `mute=True` for patterns that track state without producing sound:
+```python
+midi.n("<0 1 2 3>", c=1, mute=True, bus='clock')
+
+# In onTick, use as a sequencer clock
+clock = tc.bus('clock').oldest()
+if clock and clock['n'] == [3]:
+    print("Beat 4!")
+```
+
+#### Accessing Bus State
+
+```python
+def onTick():
+    # Get bus registry (auto-creates if missing)
+    melody = tc.bus('melody')
+    
+    # Access patterns
+    melody.oldest()             # Earliest triggered (or None if empty)
+    melody.newest()             # Most recently triggered (or None if empty)
+    
+    # Iterate all active voices
+    for chain in melody:
+        print(chain['notes'])
+    
+    # Iterate with voice IDs
+    for voice_id, chain in melody.items():
+        print(f"{voice_id}: {chain['notes']}")
+    
+    # Check if bus has active patterns
+    if melody:
+        print(f"{len(melody)} active voices")
+    
+    # Index access
+    melody[0]                   # First chain by index
+    melody[-1]                  # Last chain by index
+    
+    tc.update()
+```
+
+#### State Access
+
+Access pattern state directly via bracket notation or `.dict()`:
+```python
+chain = tc.bus('melody').oldest()
+if chain:
+    chain['notes']            # Direct access (preferred)
+    chain['step']             # Current step index (0-based)
+    chain['phase']            # Phase within cycle [0.0, 1.0)
+    chain['cycle']            # Cycle count
+    chain['n']                # Raw pattern offset values
+    chain.dict()              # Full state snapshot
+    
+    # Check if key exists
+    if 'scale_root' in chain:
+        print(chain['scale_root'])
+```
+
+**State Dictionary Keys:**
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `notes` | list[int] | Absolute MIDI note values |
+| `n` | list | Raw pattern values (offsets or absolute) |
+| `step` | int | Current step index (0-based) |
+| `phase` | float | Phase within cycle [0.0, 1.0) |
+| `cycle` | int | Current cycle number |
+| `onset` | bool | True if new event this tick |
+| `mute` | bool | True = silent/ghost pattern |
+| `velocity` | float | Note velocity [0.0-1.0] |
+| `pan` | float | Stereo pan [-1.0 to 1.0] |
+
+#### Change Detection
+
+```python
+chain.changed()           # True if onset occurred this tick
+chain.changed('n')        # True if 'n' value changed this tick
+
+# Or use boolean (truthy = onset)
+if chain:
+    print("New event!")
+```
+
+#### Accessors
+
+```python
+tc.bus('melody').oldest()  # Earliest triggered chain
+tc.bus('melody').newest()  # Most recently triggered chain
+len(tc.bus('melody'))      # Count of active voices
+```
+
+#### History (Released Voices)
+
+```python
+def onReleaseVoice(v):
+    tc.stop_patterns_for_voice(v)
+    
+    # Access chains from most recent release
+    last = tc.bus('melody').last()
+    if last:
+        notes = [c.dict()['notes'] for c in last]
+        print(f"Released: {notes}")
+
+# History access
+tc.bus('melody').last()        # Chains from last release
+tc.bus('melody').last(1)       # Second-to-last release
+tc.bus('melody').history()     # All cached releases (newest first)
+tc.bus('melody').history_limit # Max batches kept (default 10)
+```
+
+#### All Buses
+
+```python
+# tc.buses — dict of all registered buses
+for name, bus in tc.buses.items():
+    print(f"{name}: {len(bus)} active")
+
+# Check existence without auto-creating
+if 'drums' in tc.buses:
+    ...
+
+# Access by name (KeyError if missing)
+tc.buses['drums']
+
+# tc.bus() auto-creates, tc.buses[] does not
+tc.bus('new')       # Creates if missing
+tc.buses['missing'] # Raises KeyError
+```
+
+#### Debug Output
+
+```python
+print(tc.bus('melody'))  # <BusRegistry 'melody': 3 voices>
+print(chain)             # <PatternChain step=2 notes=[64, 67]>
+```
+
+#### Parameter Comparison
+
+| Parameter | `midi.n()` | `tc.n()` |
+|-----------|-----------|----------|
+| `c` | Cycle beats | Cycle beats |
+| `root` | Auto (from MIDI note) | Required or default 60 |
+| `parent` | Auto (incomingVoice) | Optional, explicit |
+| `bus` | Optional | Optional |
+| `mute` | Default False | Default False |
+
+#### Lifecycle Summary
+
+| Type | Created in | Tied to | Cleanup |
+|------|-----------|---------|---------|
+| `midi.n()` | `onTriggerVoice` | Incoming voice | Auto via `stop_patterns_for_voice()` |
+| `tc.n(parent=v)` | Anywhere | Specified voice | Auto via `stop_patterns_for_voice()` |
+| `tc.n()` (no parent) | Anywhere | None | Manual via `.stop()` |

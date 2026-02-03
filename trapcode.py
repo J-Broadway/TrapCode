@@ -1193,6 +1193,372 @@ def _tokenize(code: str) -> Iterator[Token]:
 
 
 # -----------------------------
+# Bus System (Pattern State Access)
+# -----------------------------
+import time as _time
+
+class PatternChain:
+    """
+    Universal container for pattern-based operations with state exposure.
+    
+    Wraps pattern operations, maintains state dictionary, and provides
+    change detection for cross-scope access via the bus system.
+    """
+    
+    def __init__(self, midi_wrapper=None, mute=False):
+        self._midi = midi_wrapper
+        self._mute = mute
+        self._running = True
+        self._pattern = None              # The underlying Pattern object
+        self._patterns = {}               # method_name -> Pattern (for chained modifiers)
+        self._updaters = []               # List of update functions
+        self._prev_state = {}             # For change detection
+        self._root = 60                   # Root note for offset calculation
+        self._cycle_beats = 4             # Cycle duration in beats
+        
+        # Bus registration info
+        self._bus_name = None
+        self._bus_voice_id = None
+        
+        # Parent voice tracking (for lifecycle management)
+        self._parent_voice = None
+        
+        # Base state dictionary
+        self._state = {
+            'notes': [],
+            'n': [],
+            'step': 0,
+            'phase': 0.0,
+            'cycle': 0,
+            'onset': False,
+            'mute': mute,
+            'note': 60.0,
+            'finePitch': 0.0,
+            'velocity': 0.8,
+            'pan': 0.0,
+            'length': 0,
+            'output': 0,
+            'fcut': 0.0,
+            'fres': 0.0,
+        }
+    
+    def _register(self, keys: dict, updater=None):
+        """Register state keys and optional per-tick updater."""
+        self._state.update(keys)
+        if updater:
+            self._updaters.append(updater)
+    
+    # --- Dunder methods for Pythonic access ---
+    
+    def __getitem__(self, key: str):
+        """Direct key access: chain['n'] instead of chain.dict()['n']."""
+        return self._state.get(key)
+    
+    def __contains__(self, key: str) -> bool:
+        """Membership test: 'n' in chain."""
+        return key in self._state
+    
+    def __bool__(self) -> bool:
+        """Truthy if onset occurred this tick."""
+        return self._state.get('onset', False)
+    
+    def __repr__(self) -> str:
+        """Useful debug output."""
+        notes = self._state.get('notes', [])
+        step = self._state.get('step', 0)
+        return f"<PatternChain step={step} notes={notes}>"
+    
+    # --- State access methods ---
+    
+    def dict(self) -> dict:
+        """Return snapshot of current state."""
+        return self._state.copy()
+    
+    def changed(self, key: str = None) -> bool:
+        """
+        Detect state changes.
+        
+        Args:
+            key: Specific key to check, or None for onset detection
+        
+        Returns:
+            True if change occurred this tick
+        """
+        if key is None:
+            return self._state.get('onset', False)
+        
+        current = self._state.get(key)
+        previous = self._prev_state.get(key)
+        return current != previous
+    
+    def tick(self, current_tick: int, ppq: int, cycle_beats: float):
+        """
+        Update state for this tick. Called by tc.update().
+        
+        Args:
+            current_tick: Current tick count
+            ppq: Pulses per quarter note
+            cycle_beats: Beats per cycle
+        """
+        if not self._running or self._pattern is None:
+            return
+        
+        # Store previous state for change detection
+        self._prev_state = self._state.copy()
+        
+        # Reset onset flag
+        self._state['onset'] = False
+        
+        # Get events from underlying pattern
+        events = self._pattern.tick(current_tick, ppq, cycle_beats)
+        
+        # Update phase/cycle/step from pattern's internal state
+        phase = self._pattern._phase
+        self._state['phase'] = float(phase % 1)
+        self._state['cycle'] = int(phase)
+        
+        # Process events
+        if events:
+            self._state['onset'] = True
+            
+            # Collect values from events
+            n_values = []
+            notes = []
+            for e in events:
+                if isinstance(e.value, AbsoluteNote):
+                    n_values.append(e.value.midi)
+                    notes.append(e.value.midi)
+                elif isinstance(e.value, (int, float)):
+                    n_values.append(e.value)
+                    notes.append(int(self._root + e.value))
+            
+            self._state['n'] = n_values
+            self._state['notes'] = notes
+            
+            # Calculate step from pattern position
+            # Using the first event's whole span to determine step
+            if events[0].whole:
+                step_frac = events[0].whole[0] % 1
+                # Count steps in one cycle by checking pattern structure
+                self._state['step'] = int(step_frac * self._get_steps_per_cycle())
+        
+        # Run all registered updaters (for chained modifiers like .v(), .pan())
+        for updater in self._updaters:
+            updater(current_tick, ppq, cycle_beats)
+        
+        # Fire notes if not muted and onset occurred
+        if not self._mute and self._state['onset']:
+            self._fire_notes()
+    
+    def _get_steps_per_cycle(self) -> int:
+        """Estimate number of steps per cycle from pattern structure."""
+        # Query one full cycle to count events
+        try:
+            events = self._pattern.query((Fraction(0), Fraction(1)))
+            return max(len(events), 1)
+        except:
+            return 1
+    
+    def _fire_notes(self):
+        """Fire MIDI notes for current state. Skipped when mute=True."""
+        for midi_note in self._state['notes']:
+            # Calculate duration from cycle_beats
+            steps = self._get_steps_per_cycle()
+            duration_beats = self._cycle_beats / steps if steps > 0 else 0.25
+            duration_beats = max(0.01, duration_beats)
+            
+            note_obj = Note(
+                m=int(midi_note),
+                l=self._state['length'] or duration_beats,
+                v=int(self._state['velocity'] * 127),
+                p=self._state['pan'],
+            )
+            
+            # Get parent voice for triggering
+            parent = None
+            if self._midi and hasattr(self._midi, 'parentVoice'):
+                parent = self._midi.parentVoice
+            elif self._parent_voice:
+                parent = self._parent_voice
+            
+            if parent:
+                note_obj.trigger(cut=False, parent=parent)
+    
+    # --- Lifecycle ---
+    
+    def stop(self):
+        """
+        Stop the pattern and remove from bus.
+        
+        For standalone patterns (tc.n without parent), this is required
+        for cleanup. Voice-scoped patterns are cleaned up automatically.
+        """
+        self._running = False
+        
+        # Stop the underlying pattern
+        if self._pattern:
+            self._pattern.stop()
+        
+        # Remove from bus if registered
+        if self._bus_name and self._bus_voice_id:
+            bus_reg = bus(self._bus_name)
+            if self._bus_voice_id in bus_reg:
+                dict.__delitem__(bus_reg, self._bus_voice_id)
+        
+        # Remove from chain registry
+        _unregister_chain(self)
+
+
+class BusRegistry(dict):
+    """
+    Dict-like container for PatternChains keyed by voice ID.
+    
+    Provides iteration, index access, and history tracking for released voices.
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self._history = []            # List of (release_tick, [chains]) tuples
+        self.history_limit = 10       # Max batches to keep
+        self._voice_counter = 0       # For unique IDs
+        self.name = ''                # Set when registered via tc.bus()
+    
+    # --- Dunder methods for Pythonic access ---
+    
+    def __iter__(self):
+        """Iterate PatternChains directly (not voice IDs)."""
+        return iter(self.values())
+    
+    def __getitem__(self, key):
+        """Access by index (int) or voice_id (tuple)."""
+        if isinstance(key, int):
+            # tc.bus('clock')[0] — get by index
+            values = list(self.values())
+            if not values or key >= len(values) or key < -len(values):
+                raise IndexError(f"Bus index {key} out of range")
+            return values[key]
+        return super().__getitem__(key)  # voice_id tuple access
+    
+    def __bool__(self):
+        """Truthy if has active voices."""
+        return len(self) > 0
+    
+    def __repr__(self):
+        """Useful debug output."""
+        return f"<BusRegistry '{self.name}': {len(self)} voices>"
+    
+    # --- Core methods ---
+    
+    def _generate_id(self) -> tuple:
+        """Generate unique voice ID: (timestamp, counter)."""
+        self._voice_counter += 1
+        return (_time.time(), self._voice_counter)
+    
+    def register(self, chain: 'PatternChain') -> tuple:
+        """Add chain to registry, return voice ID."""
+        voice_id = self._generate_id()
+        dict.__setitem__(self, voice_id, chain)  # Use dict method to avoid override issues
+        return voice_id
+    
+    def release(self, voice_id: tuple, release_tick: int):
+        """Move chain to history on voice release."""
+        if voice_id not in self:
+            return
+        
+        chain = self.pop(voice_id)
+        
+        # Group by release tick
+        if self._history and self._history[0][0] == release_tick:
+            self._history[0][1].append(chain)
+        else:
+            self._history.insert(0, (release_tick, [chain]))
+        
+        # Trim history
+        while len(self._history) > self.history_limit:
+            self._history.pop()
+    
+    def newest(self) -> 'PatternChain | None':
+        """Get most recently triggered chain."""
+        if not self:
+            return None
+        return dict.__getitem__(self, max(self.keys()))
+    
+    def oldest(self) -> 'PatternChain | None':
+        """Get earliest triggered chain."""
+        if not self:
+            return None
+        return dict.__getitem__(self, min(self.keys()))
+    
+    def last(self, n: int = 0) -> list:
+        """Get chains from nth-most-recent release batch."""
+        if n >= len(self._history):
+            return []
+        return self._history[n][1]
+    
+    def history(self) -> list:
+        """Get all release batches (newest first)."""
+        return [batch[1] for batch in self._history]
+
+
+class BusContainer(dict):
+    """Dict-like container for all buses. Accessed via tc.buses."""
+    pass
+
+
+# Module-level bus storage
+_buses = BusContainer()
+
+# Public API: direct access to all buses
+buses = _buses
+
+
+def bus(name: str) -> BusRegistry:
+    """
+    Get or create bus registry by name. Auto-creates if missing.
+    
+    Args:
+        name: Bus name (e.g., 'melody', 'clock')
+    
+    Returns:
+        BusRegistry for the given name
+    """
+    if name not in _buses:
+        _buses[name] = BusRegistry()
+        _buses[name].name = name
+    return _buses[name]
+
+
+# Chain registry: tracks all active PatternChains for update loop
+# Maps: id(chain) -> (chain, cycle_beats, root, parent_voice_id)
+_chain_registry = {}
+
+# Voice-to-chains mapping for cleanup
+# Maps: id(parent_voice) -> [(bus_name, bus_voice_id, chain_id), ...]
+_voice_chain_map = {}
+
+
+def _register_chain(parent_voice, chain: PatternChain, cycle_beats, root: int):
+    """Register a PatternChain for the update loop."""
+    chain_id = id(chain)
+    parent_id = id(parent_voice) if parent_voice else None
+    
+    _chain_registry[chain_id] = (chain, cycle_beats, root, parent_id)
+    
+    # Track for voice cleanup
+    if parent_id:
+        if parent_id not in _voice_chain_map:
+            _voice_chain_map[parent_id] = []
+        _voice_chain_map[parent_id].append((chain._bus_name, chain._bus_voice_id, chain_id))
+
+
+def _unregister_chain(chain: PatternChain):
+    """Remove a PatternChain from the update loop."""
+    chain_id = id(chain)
+    if chain_id in _chain_registry:
+        del _chain_registry[chain_id]
+
+
+# -----------------------------
 # Pattern Class
 # -----------------------------
 class Pattern:
@@ -1804,9 +2170,9 @@ def _update_patterns():
 # -----------------------------
 # Public API: tc.n() / tc.note()
 # -----------------------------
-def note(pattern_str: str, c = 4, root = 60) -> Pattern:
+def note(pattern_str: str, c=4, root=60, parent=None, mute=False, bus_name=None) -> 'PatternChain':
     """
-    Create a pattern from mini-notation.
+    Create a standalone pattern from mini-notation.
     
     Args:
         pattern_str: Mini-notation string (e.g., "0 3 5 7")
@@ -1814,25 +2180,64 @@ def note(pattern_str: str, c = 4, root = 60) -> Pattern:
            Can be a static value OR a UI wrapper for dynamic updates.
         root: Root note (default 60 = C4). Values in pattern are offsets from root.
               Can be a static value OR a UI wrapper for dynamic updates.
+        parent: Optional parent voice (ties pattern to voice lifecycle).
+                If provided, pattern is cleaned up via stop_patterns_for_voice().
+                If None, pattern persists until .stop() is called.
+        mute: If True, pattern is ghost/silent (state-only, no audio). Default False.
+        bus_name: Optional bus name for cross-scope state access.
     
     Returns:
-        Pattern object. Call .start() to begin playback.
+        PatternChain object (auto-started)
     
     Example:
-        pattern = tc.n("0 3 5 7", c=4, root=60)  # Static values
-        pattern = tc.n("0 3 5 7", c=tc.par.CycleKnob, root=tc.par.RootKnob)  # Dynamic
-        pattern.start()
+        # Tied to voice lifecycle
+        def onTriggerVoice(v):
+            tc.n("<0 3 5>", c=4, parent=v, bus='melody')
         
+        # Persistent (manual cleanup required)
+        _clock = None
         def onTick():
+            global _clock
+            if _clock is None:
+                _clock = tc.n("<0 1 2 3>", c=1, mute=True, bus='clock')
             tc.update()
+        
+        # Manual cleanup
+        _clock.stop()
     """
+    # Create PatternChain (no MIDI wrapper for standalone patterns)
+    chain = PatternChain(midi_wrapper=None, mute=mute)
+    
+    # Parse and set up the pattern
     pat = _parse_mini(pattern_str)
-    _active_patterns.append((pat, root, c))
-    return pat
+    chain._pattern = pat
+    chain._root = root
+    chain._cycle_beats = c
+    chain._parent_voice = parent
+    
+    # Register to bus if name provided
+    if bus_name:
+        voice_id = bus(bus_name).register(chain)
+        chain._bus_name = bus_name
+        chain._bus_voice_id = voice_id
+    
+    # Auto-start the underlying pattern
+    pat.start(_get_current_tick())
+    
+    # Register chain for update loop
+    _register_chain(parent, chain, c, root)
+    
+    return chain
 
 
-# Alias
-n = note
+def n(pattern_str: str, c=4, root=60, parent=None, mute=False, bus=None) -> 'PatternChain':
+    """
+    Create a standalone pattern from mini-notation.
+    
+    Alias for tc.note() with 'bus' as keyword arg name.
+    See tc.note() for full documentation.
+    """
+    return note(pattern_str, c=c, root=root, parent=parent, mute=mute, bus_name=bus)
 
 
 # -----------------------------
@@ -1851,7 +2256,7 @@ def _resolve_dynamic(value):
     return value
 
 
-def _midi_n(self, pattern_str: str, c = 4) -> Pattern:
+def _midi_n(self, pattern_str: str, c=4, mute=False, bus_name=None) -> 'PatternChain':
     """
     Create a pattern from mini-notation, using this voice's note as root.
     
@@ -1859,33 +2264,55 @@ def _midi_n(self, pattern_str: str, c = 4) -> Pattern:
         pattern_str: Mini-notation string (e.g., "0 3 5 7")
         c: Cycle duration in beats (default 4 = one bar).
            Can be a static value OR a UI wrapper (e.g., tc.par.MyKnob) for dynamic updates.
+        mute: If True, pattern is ghost/silent (state-only, no audio). Default False.
+        bus_name: Optional bus name for cross-scope state access.
     
     Returns:
-        Pattern object (auto-started, tied to this voice's lifecycle)
+        PatternChain object (auto-started, tied to this voice's lifecycle)
     
     Example:
         def onTriggerVoice(incomingVoice):
             midi = tc.MIDI(incomingVoice)
             midi.n("0 3 5 7", c=4)  # Static: 4 beats per cycle
             midi.n("0 3 5 7", c=tc.par.MyKnob)  # Dynamic: follows knob value
+            midi.n("<0 1 2 3>", c=1, mute=True, bus='clock')  # Ghost clock pattern
     """
+    # Create PatternChain with mute setting
+    chain = PatternChain(midi_wrapper=self, mute=mute)
+    
+    # Parse and set up the pattern
     pat = _parse_mini(pattern_str)
-    root = self.note  # Use incoming MIDI note as root
+    chain._pattern = pat
+    chain._root = self.note  # Use incoming MIDI note as root
+    chain._cycle_beats = c
+    chain._parent_voice = self.parentVoice
     
-    # Register pattern with this MIDI wrapper (self is the triggered voice)
-    # Store c as-is (may be int, float, wrapper, or callable) for dynamic resolution
-    voice_id = id(self.parentVoice)
-    _midi_patterns[voice_id] = (pat, c, root, self)
+    # Initialize bus registration tracking on MIDI wrapper if needed
+    if not hasattr(self, '_bus_registrations'):
+        self._bus_registrations = []
     
-    # Auto-start with internal tick counter
-    # Pattern starts at current tick; update() processes patterns before incrementing
+    # Register to bus if name provided
+    if bus_name:
+        voice_id = bus(bus_name).register(chain)
+        chain._bus_name = bus_name
+        chain._bus_voice_id = voice_id
+        self._bus_registrations.append((bus_name, voice_id))
+    
+    # Auto-start the underlying pattern
     pat.start(_get_current_tick())
     
-    return pat
+    # Register chain for update loop (tied to parentVoice)
+    _register_chain(self.parentVoice, chain, c, self.note)
+    
+    return chain
 
 
-# Attach method to MIDI class
-MIDI.n = _midi_n
+# Attach method to MIDI class (use 'bus' as parameter name in public API)
+def _midi_n_wrapper(self, pattern_str: str, c=4, mute=False, bus=None) -> 'PatternChain':
+    """Wrapper to allow 'bus' as keyword arg (avoiding shadowing global bus())."""
+    return _midi_n(self, pattern_str, c=c, mute=mute, bus_name=bus)
+
+MIDI.n = _midi_n_wrapper
 
 
 
@@ -1956,19 +2383,79 @@ def _update_midi_patterns():
                 note_obj.trigger(cut=False, parent=midi_wrapper.parentVoice)
 
 
+def _update_pattern_chains():
+    """Update all registered PatternChains. Called from tc.update()."""
+    try:
+        ppq = vfx.context.PPQ
+    except AttributeError:
+        return  # Not in VFX context
+    
+    current_tick = _get_current_tick()
+    
+    for chain_id in list(_chain_registry.keys()):
+        chain, cycle_beats_raw, root_raw, parent_id = _chain_registry[chain_id]
+        
+        # Skip if chain stopped
+        if not chain._running:
+            del _chain_registry[chain_id]
+            continue
+        
+        # Resolve dynamic cycle_beats each tick
+        cycle_beats = _resolve_dynamic(cycle_beats_raw)
+        try:
+            cycle_beats = float(cycle_beats)
+            if cycle_beats <= 0:
+                cycle_beats = 0.01
+        except (TypeError, ValueError):
+            cycle_beats = 4
+        
+        # Resolve dynamic root
+        root = _resolve_dynamic(root_raw)
+        chain._root = root
+        chain._cycle_beats = cycle_beats
+        
+        # Tick the chain (updates state and fires notes if not muted)
+        chain.tick(current_tick, ppq, cycle_beats)
+
+
 def stop_patterns_for_voice(parent_voice):
     """
     Stop all patterns associated with a parent voice.
-    Call this in onReleaseVoice() to clean up MIDI-bound patterns.
+    Call this in onReleaseVoice() to clean up MIDI-bound patterns and PatternChains.
     
     Args:
         parent_voice: The incoming voice that was released
     """
     voice_id = id(parent_voice)
+    
+    # Get current tick for history tracking
+    try:
+        release_tick = vfx.context.ticks
+    except AttributeError:
+        release_tick = _get_current_tick()
+    
+    # Clean up legacy _midi_patterns (for backward compatibility)
     if voice_id in _midi_patterns:
         pat, _, _, _ = _midi_patterns[voice_id]
         pat.stop()
         del _midi_patterns[voice_id]
+    
+    # Clean up PatternChains registered to this voice
+    if voice_id in _voice_chain_map:
+        for bus_name, bus_voice_id, chain_id in _voice_chain_map[voice_id]:
+            # Release from bus (moves to history)
+            if bus_name and bus_voice_id:
+                bus(bus_name).release(bus_voice_id, release_tick)
+            
+            # Remove from chain registry
+            if chain_id in _chain_registry:
+                chain, _, _, _ = _chain_registry[chain_id]
+                chain._running = False
+                if chain._pattern:
+                    chain._pattern.stop()
+                del _chain_registry[chain_id]
+        
+        del _voice_chain_map[voice_id]
 
 
 def update():
@@ -1977,15 +2464,17 @@ def update():
     
     Order of operations:
     1. Process pending triggers and releases
-    2. Update standalone patterns (tc.n)
-    3. Update MIDI-bound patterns (midi.n)
-    4. Increment tick counter (so patterns created this frame start at tick 0)
+    2. Update standalone patterns (tc.n - legacy)
+    3. Update MIDI-bound patterns (midi.n - legacy)
+    4. Update PatternChains (new bus system)
+    5. Increment tick counter (so patterns created this frame start at tick 0)
     """
     global _internal_tick
     
     _base_update()
     _update_patterns()
     _update_midi_patterns()
+    _update_pattern_chains()
     
     # Increment tick AFTER all processing, so patterns created this frame start at tick 0
     _internal_tick += 1

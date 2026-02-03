@@ -1,2 +1,6 @@
 - Consolodate tc.exports.update() into tc.update() to reduce boilerplate
-- midi.n(f"<c4 c#4 d4 eb4>/{tc.par.Cycle}") should work similar to midi.n(f"<c4 c#4 d4 eb4>", c=tc.par.Cycle) in that value is grabbed after ervery cycle to refresh speed
+- [x] midi.n(f"<c4 c#4 d4 eb4>/{tc.par.Cycle}") should work similar to midi.n(f"<c4 c#4 d4 eb4>", c=tc.par.Cycle) in that value is grabbed after every cycle to refresh speed
+- Look into tc.n() and see if .trigger() is explicitly needed to start the pattern or if it auto triggers on compile (similar to strudel). If auto-triggers consider auto_start=True flag, that way users can set it to false then explicitly trigger with .trigger() as well as functions like:
+    - .stop() # stops pattern and resets to beginning
+    - .pause() # pauses pattern but maintains its position
+    - .trigger() # resets to start while continuously playing
