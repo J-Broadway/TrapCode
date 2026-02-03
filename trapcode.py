@@ -1314,16 +1314,18 @@ class PatternChain:
         
         # Update phase/cycle/step from pattern's internal state
         phase = self._pattern._phase
-        self._state['phase'] = float(phase % 1)
-        self._state['cycle'] = int(phase)
+        phase_float = float(phase)
+        self._state['phase'] = phase_float - int(phase_float)  # Fractional part [0.0, 1.0)
+        self._state['cycle'] = int(phase_float)
         
         # Process events
         if events:
             self._state['onset'] = True
             
-            # Collect values from events
+            # Collect values and durations from events
             n_values = []
             notes = []
+            durations = []
             for e in events:
                 if isinstance(e.value, AbsoluteNote):
                     n_values.append(e.value.midi)
@@ -1331,16 +1333,30 @@ class PatternChain:
                 elif isinstance(e.value, (int, float)):
                     n_values.append(e.value)
                     notes.append(int(self._root + e.value))
+                else:
+                    continue  # Skip rests or unknown values
+                
+                # Calculate duration from event's whole span (same as _update_midi_patterns)
+                if e.whole:
+                    duration_time = e.whole[1] - e.whole[0]
+                    duration_beats = float(duration_time) * cycle_beats
+                else:
+                    duration_beats = 0.1  # Short default for continuous patterns
+                durations.append(max(0.01, duration_beats))
             
             self._state['n'] = n_values
             self._state['notes'] = notes
+            self._state['_durations'] = durations  # Internal: per-note durations
             
             # Calculate step from pattern position
             # Using the first event's whole span to determine step
             if events[0].whole:
-                step_frac = events[0].whole[0] % 1
-                # Count steps in one cycle by checking pattern structure
-                self._state['step'] = int(step_frac * self._get_steps_per_cycle())
+                whole_start = float(events[0].whole[0])
+                step_frac = whole_start - int(whole_start)  # Fractional part [0.0, 1.0)
+                # Count unique onset positions (not total events, which includes stacked notes)
+                unique_onsets = len(set(float(e.whole[0]) for e in events if e.whole))
+                # Estimate steps per cycle from events with different onset times
+                self._state['step'] = int(step_frac * max(1, unique_onsets))
         
         # Run all registered updaters (for chained modifiers like .v(), .pan())
         for updater in self._updaters:
@@ -1351,25 +1367,45 @@ class PatternChain:
             self._fire_notes()
     
     def _get_steps_per_cycle(self) -> int:
-        """Estimate number of steps per cycle from pattern structure."""
-        # Query one full cycle to count events
+        """
+        Estimate number of unique onset positions per cycle.
+        
+        For chords like [c4,e4,g4], multiple notes share the same onset,
+        so we count unique onset times rather than total events.
+        """
         try:
             events = self._pattern.query((Fraction(0), Fraction(1)))
-            return max(len(events), 1)
+            if not events:
+                return 1
+            # Count unique onset positions (whole[0] values)
+            unique_onsets = set()
+            for e in events:
+                if e.whole:
+                    unique_onsets.add(float(e.whole[0]))
+            return max(len(unique_onsets), 1)
         except:
             return 1
     
     def _fire_notes(self):
         """Fire MIDI notes for current state. Skipped when mute=True."""
-        for midi_note in self._state['notes']:
-            # Calculate duration from cycle_beats
-            steps = self._get_steps_per_cycle()
-            duration_beats = self._cycle_beats / steps if steps > 0 else 0.25
-            duration_beats = max(0.01, duration_beats)
+        notes = self._state['notes']
+        durations = self._state.get('_durations', [])
+        
+        for i, midi_note in enumerate(notes):
+            # Use per-note duration from event's whole span, or fallback
+            if i < len(durations):
+                duration_beats = durations[i]
+            else:
+                # Fallback: estimate from cycle_beats (shouldn't happen normally)
+                duration_beats = max(0.01, self._cycle_beats / 4)
+            
+            # Allow explicit length override from state
+            if self._state['length']:
+                duration_beats = self._state['length']
             
             note_obj = Note(
                 m=int(midi_note),
-                l=self._state['length'] or duration_beats,
+                l=duration_beats,
                 v=int(self._state['velocity'] * 127),
                 p=self._state['pan'],
             )
