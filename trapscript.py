@@ -241,23 +241,314 @@ chords = _Registry('chords', {
 })
 
 # -----------------------------
+# Pattern Context Mixin
+# -----------------------------
+class _CompContextMixin:
+    """
+    Mixin providing shared pattern creation, scale handling, and voice defaults.
+    
+    No __init__ — shared config goes through _configure_context().
+    Designed to work with multiple inheritance (MIDI inherits from vfx.Voice).
+    
+    Template methods:
+        _resolve_root(scale_root, is_explicit) -> (root_midi, base_degree)
+        _on_pattern_created(chain) -> None
+    """
+    
+    def _configure_context(
+        self,
+        cycle=4,
+        scale=None,
+        octave=4,
+        # Voice attribute defaults (mirror vfx.Voice)
+        velocity=80,       # 0-127 (TrapScript default)
+        length=None,       # None = context-appropriate; value = override
+        pan=0.0,           # -1 left, 0 center, 1 right
+        output=0,          # Voice output port (0-based)
+        fcut=0.0,          # Mod X / filter cutoff (-1 to 1)
+        fres=0.0,          # Mod Y / filter resonance (-1 to 1)
+        finePitch=0.0,     # Microtonal pitch offset
+        color=0,           # Note color / MIDI channel (0-15)
+        releaseVelocity=0, # Release velocity (0-127)
+    ):
+        """Initialize shared context state. Called from subclass __init__."""
+        # TrapScript-specific
+        self._cycle = cycle
+        self._octave = octave
+        
+        # Voice attribute defaults
+        self._default_velocity = velocity
+        self._default_length = length
+        self._default_pan = pan
+        self._default_output = output
+        self._default_fcut = fcut
+        self._default_fres = fres
+        self._default_finePitch = finePitch
+        self._default_color = color
+        self._default_releaseVelocity = releaseVelocity
+        
+        # Scale parsing
+        self._scale = None
+        self._scale_root = None
+        self._scale_explicit = False
+        if scale:
+            self._scale, self._scale_root, self._scale_explicit = _parse_scale(scale)
+    
+    def note(self, pattern_str, cycle=None, scale=None, mute=False, bus=None, **kwargs):
+        """
+        Create a pattern from mini-notation.
+        
+        Args:
+            pattern_str: Mini-notation string (e.g., "0 3 5 7")
+            cycle: Cycle duration in beats. Inherits from context if None. Alias: c
+            scale: Scale string (e.g., "c5:major"). Inherits from context if None.
+            mute: If True, pattern is ghost/silent (state-only, no audio).
+            bus: Optional bus name for cross-scope state access.
+        
+        Returns:
+            PatternChain object
+        """
+        # Resolve alias: c -> cycle
+        aliases = _resolve_pattern_kwargs('note', kwargs, keys=['cycle'])
+        cycle = aliases.get('cycle', cycle)
+        
+        # Inherit from context if not overridden
+        cycle_beats = cycle if cycle is not None else self._cycle
+        
+        # Parse scale if provided at .note() level, else inherit from context
+        if scale is not None:
+            active_scale, active_scale_root, is_explicit = _parse_scale(scale)
+        else:
+            active_scale = self._scale
+            active_scale_root = self._scale_root
+            is_explicit = self._scale_explicit
+        
+        # Get parent voice (MIDI has parentVoice, Comp has _parent)
+        parent_voice = getattr(self, 'parentVoice', None) or getattr(self, '_parent', None)
+        
+        # Build chain through unified constructor
+        chain = _build_pattern_chain(
+            pattern_str,
+            cycle_beats=cycle_beats,
+            mute=mute,
+            bus=bus,
+            midi_wrapper=self if hasattr(self, 'parentVoice') else None,
+            parent_voice=parent_voice,
+        )
+        
+        # Store scale info on chain for note resolution
+        chain._scale = active_scale
+        chain._scale_root = active_scale_root
+        chain._scale_explicit = is_explicit
+        
+        # Resolve root via template method
+        if active_scale is not None:
+            root, base_degree = self._resolve_root(active_scale, active_scale_root, is_explicit)
+            chain._root = root
+            chain._base_degree = base_degree
+        else:
+            # No scale: chromatic mode
+            chain._root = getattr(self, 'note', 60) if hasattr(self, 'parentVoice') else 60
+            chain._base_degree = 0
+        
+        # Apply voice defaults to chain state
+        self._apply_voice_defaults(chain)
+        
+        # Call template method for lifecycle policy
+        self._on_pattern_created(chain)
+        
+        return chain
+    
+    # Alias
+    n = note
+    
+    def _apply_voice_defaults(self, chain):
+        """Apply context's voice defaults to chain state."""
+        # Normalize velocity from 0-127 to 0.0-1.0 for internal use
+        chain._state['velocity'] = self._default_velocity / 127.0
+        chain._state['length'] = self._default_length or 0  # 0 means use event spans
+        chain._state['pan'] = self._default_pan
+        chain._state['output'] = self._default_output
+        chain._state['fcut'] = self._default_fcut
+        chain._state['fres'] = self._default_fres
+        chain._state['finePitch'] = self._default_finePitch
+        chain._state['color'] = self._default_color
+        # Note: releaseVelocity stored but may not be used by all output paths
+    
+    def _resolve_root(self, active_scale, scale_root, is_explicit):
+        """
+        Template method: resolve root note and base degree.
+        
+        Must be overridden by subclasses.
+        
+        Args:
+            active_scale: Scale intervals list
+            scale_root: MIDI note of scale root
+            is_explicit: Whether scale root has explicit octave
+        
+        Returns:
+            (root_midi, base_degree) tuple
+        """
+        raise NotImplementedError("Subclasses must implement _resolve_root")
+    
+    def _on_pattern_created(self, chain):
+        """
+        Template method: called after pattern chain is built.
+        
+        Override for lifecycle policy (e.g., auto-trigger for MIDI).
+        Default: no-op (manual trigger required).
+        """
+        pass
+
+
+# -----------------------------
 # MIDI voice helper
 # -----------------------------
-class MIDI(vfx.Voice):
+class MIDI(vfx.Voice, _CompContextMixin):
+    """
+    Voice-bound pattern context. Auto-triggers patterns, auto-releases on voice release.
+    
+    Usage:
+        def onTriggerVoice(v):
+            midi = ts.MIDI(v, scale="c:major")
+            midi.n("0 2 4")  # auto-triggered
+    """
     parentVoice = None
+    
     def __init__(self, incomingVoice, cycle=4, scale=None, **kwargs):
         cycle = kwargs.pop('c', cycle)
         if kwargs:
             raise TypeError(f"MIDI() got unexpected keyword arguments: {list(kwargs.keys())}")
-        super().__init__(incomingVoice)
+        super().__init__(incomingVoice)  # vfx.Voice init
         self.parentVoice = incomingVoice
-        self._cycle = cycle              # Default cycle beats
-        self._scale = None             # Scale intervals (e.g., [0,2,3,5,7,8,10])
-        self._scale_root = None        # Scale root as MIDI note (e.g., 72 for C5)
-        self._scale_explicit = False   # Whether scale root has explicit octave
+        self._configure_context(cycle=cycle, scale=scale)  # Mixin init
+    
+    def _resolve_root(self, active_scale, scale_root, is_explicit):
+        """
+        MIDI-specific root resolution: use incoming voice for implicit scales.
+        """
+        if is_explicit:
+            # Explicit: degree 0 = scale root, ignore incoming voice
+            return scale_root, 0
+        else:
+            # Implicit: degree 0 = incoming voice's position in scale
+            snapped = _quantize_to_scale(self.note, active_scale, scale_root)
+            base_deg = _midi_to_scale_degree(self.note, active_scale, scale_root)
+            return snapped, base_deg
+    
+    def _on_pattern_created(self, chain):
+        """Auto-trigger patterns created by MIDI context."""
+        chain.trigger()
+
+
+# -----------------------------
+# Standalone composition context
+# -----------------------------
+class Comp(_CompContextMixin):
+    """
+    Standalone pattern context. Manual trigger/release.
+    
+    Unlike MIDI, patterns must be explicitly triggered via .trigger().
+    Use parent= for automatic cleanup when a voice releases.
+    
+    Usage:
+        def onTick():
+            global _pat
+            if _pat is None:
+                _pat = ts.comp(scale="c:minor").n("0 1 2").trigger()
+            ts.update()
         
-        if scale:
-            self._scale, self._scale_root, self._scale_explicit = _parse_scale(scale)
+        # With parent binding for auto-cleanup:
+        def onTriggerVoice(v):
+            ts.comp(scale="c5:major", parent=v).n("0 2 4").trigger()
+    """
+    
+    def __init__(
+        self,
+        octave=4,
+        scale=None,
+        root=None,
+        cycle=4,
+        # Voice attribute defaults (mirror vfx.Voice)
+        velocity=80,       # 0-127 (TrapScript default)
+        length=None,       # None = pattern event spans (legato); value = override
+        pan=0.0,           # -1 left, 0 center, 1 right
+        output=0,          # Voice output port (0-based)
+        fcut=0.0,          # Mod X / filter cutoff (-1 to 1)
+        fres=0.0,          # Mod Y / filter resonance (-1 to 1)
+        finePitch=0.0,     # Microtonal pitch offset
+        color=0,           # Note color / MIDI channel (0-15)
+        releaseVelocity=0, # Release velocity (0-127)
+        parent=None,       # Optional voice binding for auto-cleanup
+    ):
+        self._configure_context(
+            cycle=cycle, scale=scale, octave=octave,
+            velocity=velocity, length=length, pan=pan,
+            output=output, fcut=fcut, fres=fres,
+            finePitch=finePitch, color=color,
+            releaseVelocity=releaseVelocity,
+        )
+        self._root_param = root   # Optional root override for implicit scales
+        self._parent = parent     # Optional voice binding for auto-cleanup
+    
+    def _resolve_root(self, active_scale, scale_root, is_explicit):
+        """
+        Comp-specific root resolution: use scale root or root= parameter.
+        """
+        if is_explicit:
+            # Explicit: degree 0 = scale root, ignore root= param
+            return scale_root, 0
+        elif self._root_param is not None:
+            # Implicit with root=: snap root param to scale
+            # Handle root as MIDI note or string
+            if isinstance(self._root_param, str):
+                root_midi = _note_to_midi(self._root_param, default_octave=self._octave)
+            else:
+                root_midi = self._root_param
+            snapped = _quantize_to_scale(root_midi, active_scale, scale_root)
+            base_deg = _midi_to_scale_degree(root_midi, active_scale, scale_root)
+            return snapped, base_deg
+        else:
+            # Implicit without root=: default to scale root
+            return scale_root, 0
+    
+    def _on_pattern_created(self, chain):
+        """
+        Manual lifecycle: user calls .trigger() explicitly.
+        Only set parent binding if provided.
+        """
+        if self._parent:
+            chain._parent_voice = self._parent
+
+
+def comp(**kwargs) -> Comp:
+    """
+    Create a standalone composition context.
+    
+    Args:
+        octave: Default octave (default 4)
+        scale: Scale string (e.g., "c:minor", "a4:major")
+        root: Optional root override for implicit scales
+        cycle: Default cycle duration in beats (default 4)
+        velocity: Default velocity 0-127 (default 80)
+        length: Note length override in beats (default None = use event spans)
+        pan: Default pan -1 to 1 (default 0)
+        output: Voice output port (default 0)
+        fcut: Mod X / filter cutoff -1 to 1 (default 0)
+        fres: Mod Y / filter resonance -1 to 1 (default 0)
+        finePitch: Microtonal pitch offset (default 0)
+        color: Note color / MIDI channel 0-15 (default 0)
+        releaseVelocity: Release velocity 0-127 (default 0)
+        parent: Optional voice binding for auto-cleanup
+    
+    Returns:
+        Comp instance
+    
+    Example:
+        ts.comp(scale="c:minor").n("0 1 2").trigger()
+    """
+    return Comp(**kwargs)
+
 
 # -----------------------------
 # Public parameter namespace
@@ -1509,7 +1800,7 @@ class PatternChain:
     def __init__(self, midi_wrapper=None, mute=False):
         self._midi = midi_wrapper
         self._mute = mute
-        self._running = True
+        self._running = False  # Chains start in 'created' state; trigger() moves to 'running'
         self._pattern = None              # The underlying Pattern object
         self._patterns = {}               # method_name -> Pattern (for chained modifiers)
         self._updaters = []               # List of update functions
@@ -1742,12 +2033,50 @@ class PatternChain:
     
     # --- Lifecycle ---
     
+    def trigger(self):
+        """
+        Start the pattern and register for update loop.
+        
+        Idempotent: if already running and registered, returns self without
+        duplicate registration.
+        
+        Returns:
+            self (for method chaining)
+        """
+        # Idempotent: already running and registered
+        if self._running and id(self) in _chain_registry:
+            return self
+        
+        # Check unbound chain guard (memory leak protection)
+        if self._parent_voice is None:
+            _check_unbound_chain_count()
+        
+        self._running = True
+        
+        # Start the underlying pattern
+        if self._pattern:
+            self._pattern.start(_get_current_tick())
+        
+        # Register for update loop
+        _register_chain(
+            self._parent_voice, self,
+            self._cycle_beats, self._root
+        )
+        
+        return self
+    
     def stop(self):
         """
-        Stop the pattern and remove from bus.
+        Stop the pattern and remove from registries.
         
-        For standalone patterns (tc.n without parent), this is required
-        for cleanup. Voice-scoped patterns are cleaned up automatically.
+        Idempotent: safe to call multiple times.
+        
+        For standalone patterns (ts.comp without parent), this is required
+        for cleanup. Voice-scoped patterns are cleaned up automatically
+        via stop_patterns_for_voice().
+        
+        Returns:
+            self (for method chaining)
         """
         self._running = False
         
@@ -1761,8 +2090,10 @@ class PatternChain:
             if self._bus_voice_id in bus_reg:
                 dict.__delitem__(bus_reg, self._bus_voice_id)
         
-        # Remove from chain registry
+        # Remove from chain registry (idempotent)
         _unregister_chain(self)
+        
+        return self
 
 
 class BusRegistry(dict):
@@ -1915,6 +2246,72 @@ def _unregister_chain(chain: PatternChain):
     chain_id = id(chain)
     if chain_id in _chain_registry:
         del _chain_registry[chain_id]
+
+
+# Unbound chain guard thresholds (memory leak protection)
+_UNBOUND_CHAIN_WARN_THRESHOLD = 32
+_UNBOUND_CHAIN_ERROR_THRESHOLD = 128
+
+
+def _check_unbound_chain_count():
+    """
+    Check for potential memory leak from unbound Comp chains.
+    
+    Called from PatternChain.trigger() when chain has no parent binding.
+    Warns at 32, errors at 128 unbound chains.
+    """
+    unbound_count = sum(
+        1 for chain_id, (chain, _, _, parent_id) in _chain_registry.items()
+        if parent_id is None
+    )
+    
+    if unbound_count >= _UNBOUND_CHAIN_ERROR_THRESHOLD:
+        raise RuntimeError(
+            f"[TrapScript] {unbound_count} unbound pattern chains detected. "
+            f"This indicates a memory leak — patterns created in onTick() without "
+            f"parent= binding or .stop() cleanup. Use global variables with "
+            f"'if None' guards, or provide parent= for automatic cleanup."
+        )
+    elif unbound_count >= _UNBOUND_CHAIN_WARN_THRESHOLD:
+        print(
+            f"[TrapScript] Warning: {unbound_count} unbound pattern chains. "
+            f"Consider using parent= binding or manual .stop() cleanup."
+        )
+
+
+def _build_pattern_chain(pattern_str, cycle_beats=4, mute=False, bus=None,
+                         midi_wrapper=None, parent_voice=None):
+    """
+    Unified builder for PatternChain construction.
+    
+    Does NOT call pat.start() or _register_chain() — those are lifecycle
+    concerns handled by PatternChain.trigger().
+    
+    Args:
+        pattern_str: Mini-notation pattern string
+        cycle_beats: Cycle duration in beats
+        mute: If True, pattern is ghost/silent (state-only)
+        bus: Optional bus name for cross-scope state access
+        midi_wrapper: Optional MIDI instance for voice-bound patterns
+        parent_voice: Optional parent voice for lifecycle binding
+    
+    Returns:
+        Configured PatternChain (not yet triggered)
+    """
+    chain = PatternChain(midi_wrapper=midi_wrapper, mute=mute)
+    pat = _parse_mini(pattern_str)
+    chain._pattern = pat
+    chain._cycle_beats = cycle_beats
+    chain._parent_voice = parent_voice
+    chain._state['parentVoice'] = parent_voice
+    
+    # Register to bus if name provided
+    if bus:
+        voice_id = _get_bus(bus).register(chain)
+        chain._bus_name = bus
+        chain._bus_voice_id = voice_id
+    
+    return chain
 
 
 # -----------------------------
@@ -2574,150 +2971,8 @@ def _parse_mini(code: str) -> Pattern:
 
 
 # -----------------------------
-# Pattern Registry (for update loop)
+# Dynamic Value Resolution
 # -----------------------------
-_active_patterns = []  # List of (pattern, root, cycle_beats) tuples
-
-
-def _update_patterns():
-    """Update all active patterns. Called from tc.update()."""
-    try:
-        ppq = vfx.context.PPQ
-    except AttributeError:
-        return  # Not in VFX context
-    
-    # Use internal tick counter for consistent timing
-    current_tick = _get_current_tick()
-    
-    for pattern, root_raw, cycle_beats_raw in _active_patterns[:]:
-        # Resolve dynamic parameters each tick (allow fractional for smooth control)
-        root = _resolve_dynamic(root_raw)
-        cycle_beats = _resolve_dynamic(cycle_beats_raw)
-        try:
-            cycle_beats = float(cycle_beats)
-            if cycle_beats <= 0:
-                cycle_beats = 0.01  # Minimum: very fast
-        except (TypeError, ValueError):
-            cycle_beats = 4
-        
-        events = pattern.tick(current_tick, ppq, cycle_beats)
-        
-        # Use the latched cycle_beats for duration calculation
-        active_cycle_beats = pattern._latched_cycle_beats or cycle_beats
-        
-        for e in events:
-            # Resolve note value: AbsoluteNote is absolute, numbers are relative to root
-            if isinstance(e.value, AbsoluteNote):
-                note_val = e.value.midi  # Absolute MIDI from note name
-            elif isinstance(e.value, (int, float)):
-                note_val = root + e.value  # Relative offset from root
-            else:
-                note_val = None  # Rest or unknown
-            
-            if note_val is not None:
-                # Calculate duration from event's whole span (use latched value)
-                if e.whole:
-                    duration_time = e.whole[1] - e.whole[0]
-                    duration_beats = float(duration_time) * active_cycle_beats
-                else:
-                    duration_beats = 0.1  # Short default for fast patterns
-                
-                # Clamp minimum duration
-                duration_beats = max(0.01, duration_beats)
-                
-                note = Single(midi=int(note_val), length=duration_beats)
-                note.trigger(cut=False)
-
-
-# -----------------------------
-# Public API: tc.n() / tc.note()
-# -----------------------------
-def note(pattern_str: str, cycle=4, root=60, parent=None, mute=False, bus=None, **kwargs) -> 'PatternChain':
-    """
-    Create a standalone pattern from mini-notation.
-    
-    Args:
-        pattern_str: Mini-notation string (e.g., "0 3 5 7")
-        cycle: Cycle duration in beats (default 4 = one bar). Alias: c
-               Can be a static value OR a UI wrapper for dynamic updates.
-        root: Root note (default 60 = C4). Values in pattern are offsets from root. Alias: r
-              Can be a static value OR a UI wrapper for dynamic updates.
-        parent: Optional parent voice (ties pattern to voice lifecycle).
-                If provided, pattern is cleaned up via stop_patterns_for_voice().
-                If None, pattern persists until .stop() is called.
-        mute: If True, pattern is ghost/silent (state-only, no audio). Default False.
-        bus: Optional bus name for cross-scope state access.
-    
-    Returns:
-        PatternChain object (auto-started)
-    
-    Example:
-        # Tied to voice lifecycle
-        def onTriggerVoice(v):
-            tc.n("<0 3 5>", cycle=4, parent=v, bus='melody')
-        
-        # Persistent (manual cleanup required)
-        _clock = None
-        def onTick():
-            global _clock
-            if _clock is None:
-                _clock = tc.n("<0 1 2 3>", cycle=1, mute=True, bus='clock')
-            tc.update()
-        
-        # Manual cleanup
-        _clock.stop()
-    """
-    # Resolve aliases: c -> cycle, r -> root
-    aliases = _resolve_pattern_kwargs('note', kwargs)
-    cycle = aliases.get('cycle', cycle)
-    root = aliases.get('root', root)
-    
-    # Create PatternChain (no MIDI wrapper for standalone patterns)
-    chain = PatternChain(midi_wrapper=None, mute=mute)
-    
-    # Parse and set up the pattern
-    pat = _parse_mini(pattern_str)
-    chain._pattern = pat
-    chain._root = root
-    chain._cycle_beats = cycle
-    chain._parent_voice = parent
-    
-    # Expose parent voice in state (if provided)
-    chain._state['parentVoice'] = parent
-    
-    # Register to bus if name provided
-    if bus:
-        voice_id = _get_bus(bus).register(chain)
-        chain._bus_name = bus
-        chain._bus_voice_id = voice_id
-    
-    # Auto-start the underlying pattern
-    pat.start(_get_current_tick())
-    
-    # Register chain for update loop
-    _register_chain(parent, chain, cycle, root)
-    
-    return chain
-
-
-def n(pattern_str: str, cycle=4, root=60, parent=None, mute=False, bus=None, **kwargs) -> 'PatternChain':
-    """
-    Create a standalone pattern from mini-notation.
-    
-    Alias for tc.note(). See tc.note() for full documentation.
-    """
-    # Resolve aliases: c -> cycle, r -> root
-    aliases = _resolve_pattern_kwargs('n', kwargs)
-    cycle = aliases.get('cycle', cycle)
-    root = aliases.get('root', root)
-    return note(pattern_str, cycle=cycle, root=root, parent=parent, mute=mute, bus=bus)
-
-
-# -----------------------------
-# MIDI.n() Method
-# -----------------------------
-# Store pattern data on MIDI instances
-_midi_patterns = {}  # voice_id -> (pattern, cycle_beats, root, midi_wrapper)
 
 
 def _resolve_dynamic(value):
@@ -2729,189 +2984,8 @@ def _resolve_dynamic(value):
     return value
 
 
-def _midi_n(self, pattern_str: str, cycle=None, scale=None, mute=False, bus=None, **kwargs) -> 'PatternChain':
-    """
-    Create a pattern from mini-notation, using this voice's note as root.
-    
-    Args:
-        pattern_str: Mini-notation string (e.g., "0 3 5 7")
-        cycle: Cycle duration in beats. Inherits from MIDI instance if None. Alias: c
-               Can be a static value OR a UI wrapper (e.g., ts.par.MyKnob) for dynamic updates.
-        scale: Scale string (e.g., "c5:major"). Inherits from MIDI instance if None.
-        mute: If True, pattern is ghost/silent (state-only, no audio). Default False.
-        bus: Optional bus name for cross-scope state access.
-    
-    Returns:
-        PatternChain object (auto-started, tied to this voice's lifecycle)
-    
-    Example:
-        def onTriggerVoice(incomingVoice):
-            midi = ts.MIDI(incomingVoice, cycle=4, scale="c5:major")
-            midi.n("0 2 4 6")              # Inherits cycle=4, scale=c5:major -> Cmaj7
-            midi.n("0 2 4", cycle=2)       # cycle overridden to 2
-            midi.n("0 2 4", scale="a4:minor")  # Scale overridden
-    """
-    # Resolve alias: c -> cycle
-    aliases = _resolve_pattern_kwargs('midi.n', kwargs, keys=['cycle'])
-    cycle = aliases.get('cycle', cycle)
-    
-    # Inherit from MIDI instance if not overridden
-    cycle_beats = cycle if cycle is not None else self._cycle
-    
-    # Parse scale if provided at .n() level, else inherit from MIDI
-    if scale is not None:
-        active_scale, active_scale_root, is_explicit = _parse_scale(scale)
-    else:
-        active_scale = self._scale
-        active_scale_root = self._scale_root
-        is_explicit = self._scale_explicit
-    
-    # Create PatternChain with mute setting
-    chain = PatternChain(midi_wrapper=self, mute=mute)
-    
-    # Parse and set up the pattern
-    pat = _parse_mini(pattern_str)
-    chain._pattern = pat
-    chain._cycle_beats = cycle_beats
-    chain._parent_voice = self.parentVoice
-    
-    # Store scale info on chain for note resolution
-    chain._scale = active_scale
-    chain._scale_root = active_scale_root
-    chain._scale_explicit = is_explicit
-    
-    # Determine pattern root
-    if active_scale is not None:
-        if is_explicit:
-            # Explicit root: degree 0 = scale root, ignore incoming voice
-            chain._root = active_scale_root
-            chain._base_degree = 0
-        else:
-            # Implicit root: degree 0 = incoming voice's position (reactive)
-            snapped_note = _quantize_to_scale(self.note, active_scale, active_scale_root)
-            chain._root = snapped_note
-            chain._base_degree = _midi_to_scale_degree(self.note, active_scale, active_scale_root)
-    else:
-        chain._root = self.note  # Chromatic mode: root is incoming voice note
-    
-    # Expose parent voice in state
-    chain._state['parentVoice'] = self.parentVoice
-    
-    # Initialize bus registration tracking on MIDI wrapper if needed
-    if not hasattr(self, '_bus_registrations'):
-        self._bus_registrations = []
-    
-    # Register to bus if name provided
-    if bus:
-        voice_id = _get_bus(bus).register(chain)
-        chain._bus_name = bus
-        chain._bus_voice_id = voice_id
-        self._bus_registrations.append((bus, voice_id))
-    
-    # Auto-start the underlying pattern
-    pat.start(_get_current_tick())
-    
-    # Register chain for update loop (tied to parentVoice)
-    _register_chain(self.parentVoice, chain, cycle_beats, chain._root)
-    
-    if _debug_enabled:
-        scale_info = f"scale={scale or (self._scale is not None and 'inherited')}" if (active_scale is not None) else "chromatic"
-        _log("midi.n", f"pattern='{pattern_str}' c={cycle_beats} root={chain._root} {scale_info}", level=1)
-    
-    return chain
-
-
-# Attach method to MIDI class (use 'bus' as parameter name in public API)
-def _midi_note_wrapper(self, pattern_str: str, cycle=None, scale=None, mute=False, bus=None, **kwargs) -> 'PatternChain':
-    """Wrapper that passes through to _midi_n with alias support."""
-    return _midi_n(self, pattern_str, cycle=cycle, scale=scale, mute=mute, bus=bus, **kwargs)
-
-MIDI.n = _midi_note_wrapper  # Note: .note() not available (conflicts with vfx.Voice.note attribute)
-
-
-
-
-def _update_midi_patterns():
-    """Update MIDI-bound patterns. Called from tc.update()."""
-    try:
-        ppq = vfx.context.PPQ
-    except AttributeError:
-        return
-    
-    # Use internal tick counter for consistent timing
-    current_tick = _get_current_tick()
-    
-    for voice_id in list(_midi_patterns.keys()):
-        pat, cycle_beats_raw, root, midi_wrapper = _midi_patterns[voice_id]
-        
-        # Resolve dynamic cycle_beats each tick (allow fractional for smooth control)
-        cycle_beats = _resolve_dynamic(cycle_beats_raw)
-        try:
-            cycle_beats = float(cycle_beats)
-            if cycle_beats <= 0:
-                cycle_beats = 0.01  # Minimum: very fast (100x per beat)
-        except (TypeError, ValueError):
-            cycle_beats = 4  # Fallback to default
-        
-        # Check if the pattern is still running
-        if not pat._running:
-            del _midi_patterns[voice_id]
-            continue
-        
-        # Debug: show timing info (using pattern's internal phase and latched cycle)
-        latched_c = pat._latched_cycle_beats or cycle_beats
-        _log("patterns", f"tick={current_tick} phase={float(pat._phase):.4f} c={cycle_beats:.3f} latched_c={latched_c:.3f}", level=2)
-        
-        # Process events (pattern.tick() uses cycle-latched timing)
-        events = pat.tick(current_tick, ppq, cycle_beats)
-        
-        # Use the latched cycle_beats for duration calculation (consistent within cycle)
-        active_cycle_beats = pat._latched_cycle_beats or cycle_beats
-        
-        for e in events:
-            _log("patterns", f"EVENT value={e.value} whole=({float(e.whole[0]):.4f}, {float(e.whole[1]):.4f}) part=({float(e.part[0]):.4f}, {float(e.part[1]):.4f}) has_onset={e.has_onset()}", level=2)
-        
-        # Get scale info from MIDI wrapper (if available)
-        _mw_scale = getattr(midi_wrapper, '_scale', None)
-        _mw_scale_root = getattr(midi_wrapper, '_scale_root', None)
-        _mw_scale_explicit = getattr(midi_wrapper, '_scale_explicit', False)
-        
-        for e in events:
-            # Resolve note value: scale-aware resolution
-            if isinstance(e.value, AbsoluteNote):
-                if _mw_scale is not None:
-                    note_val = _quantize_to_scale(e.value.midi, _mw_scale, _mw_scale_root)
-                else:
-                    note_val = e.value.midi  # Absolute MIDI from note name
-            elif isinstance(e.value, (int, float)):
-                if _mw_scale is not None:
-                    _base_deg = 0 if _mw_scale_explicit else getattr(midi_wrapper, '_base_degree', 0)
-                    absolute_degree = _base_deg + int(e.value)
-                    note_val = _scale_degree_to_midi(absolute_degree, _mw_scale, _mw_scale_root)
-                else:
-                    note_val = root + e.value  # Relative offset from root
-            else:
-                note_val = None  # Rest or unknown
-            
-            if note_val is not None:
-                # Calculate duration from event's whole span (use latched cycle_beats)
-                if e.whole:
-                    duration_time = e.whole[1] - e.whole[0]
-                    duration_beats = float(duration_time) * active_cycle_beats
-                else:
-                    duration_beats = 0.1  # Short default for fast patterns
-                
-                # Clamp minimum duration to avoid zero-length notes
-                duration_beats = max(0.01, duration_beats)
-                
-                _log("patterns", f"TRIGGER note={note_val} duration={duration_beats:.3f} beats", level=1)
-                
-                note_obj = Single(midi=int(note_val), length=duration_beats)
-                note_obj.trigger(cut=False, parent=midi_wrapper.parentVoice)
-
-
 def _update_pattern_chains():
-    """Update all registered PatternChains. Called from tc.update()."""
+    """Update all registered PatternChains. Called from ts.update()."""
     try:
         ppq = vfx.context.PPQ
     except AttributeError:
@@ -2922,9 +2996,8 @@ def _update_pattern_chains():
     for chain_id in list(_chain_registry.keys()):
         chain, cycle_beats_raw, root_raw, parent_id = _chain_registry[chain_id]
         
-        # Skip if chain stopped
+        # Skip if chain stopped (stop() should have already unregistered)
         if not chain._running:
-            del _chain_registry[chain_id]
             continue
         
         # Resolve dynamic cycle_beats each tick
@@ -2961,26 +3034,17 @@ def stop_patterns_for_voice(parent_voice):
     except AttributeError:
         release_tick = _get_current_tick()
     
-    # Clean up legacy _midi_patterns (for backward compatibility)
-    if voice_id in _midi_patterns:
-        pat, _, _, _ = _midi_patterns[voice_id]
-        pat.stop()
-        del _midi_patterns[voice_id]
-    
     # Clean up PatternChains registered to this voice
     if voice_id in _voice_chain_map:
         for bus_name, bus_voice_id, chain_id in _voice_chain_map[voice_id]:
-            # Release from bus (moves to history)
+            # Release from bus (moves to history) BEFORE chain.stop() does hard delete
             if bus_name and bus_voice_id:
                 bus(bus_name).release(bus_voice_id, release_tick)
             
-            # Remove from chain registry
+            # Stop via lifecycle method (handles registry cleanup)
             if chain_id in _chain_registry:
                 chain, _, _, _ = _chain_registry[chain_id]
-                chain._running = False
-                if chain._pattern:
-                    chain._pattern.stop()
-                del _chain_registry[chain_id]
+                chain.stop()
         
         del _voice_chain_map[voice_id]
 
@@ -2991,16 +3055,12 @@ def update():
     
     Order of operations:
     1. Process pending triggers and releases
-    2. Update standalone patterns (tc.n - legacy)
-    3. Update MIDI-bound patterns (midi.n - legacy)
-    4. Update PatternChains (new bus system)
-    5. Increment tick counter (so patterns created this frame start at tick 0)
+    2. Update all PatternChains
+    3. Increment tick counter (so patterns created this frame start at tick 0)
     """
     global _internal_tick
     
     _base_update()
-    _update_patterns()
-    _update_midi_patterns()
     _update_pattern_chains()
     
     # Increment tick AFTER all processing, so patterns created this frame start at tick 0
