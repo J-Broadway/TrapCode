@@ -53,33 +53,45 @@ Since `MIDI` must inherit from `vfx.Voice` (external FL Studio class with incomp
 ```python
 class _CompContextMixin:
     """
-    Mixin providing shared pattern creation and scale handling.
+    Mixin providing shared pattern creation, scale handling, and voice defaults.
     
     No __init__ — shared config goes through _configure_context().
     Designed to work with multiple inheritance (MIDI inherits from vfx.Voice).
+    
+    See phase1.3.2.3 for full _configure_context() signature with all voice attributes.
     """
     
-    def _configure_context(self, cycle=4, scale=None, octave=4, velocity=1.0, pan=0.0):
+    def _configure_context(
+        self,
+        cycle=4,
+        scale=None,
+        octave=4,
+        velocity=80,       # 0-127 (TrapScript default)
+        length=None,       # None = pattern spans; value = override
+        pan=0.0,           # -1 to 1
+        output=0,          # Voice output port
+        fcut=0.0,          # Mod X (-1 to 1)
+        fres=0.0,          # Mod Y (-1 to 1)
+        finePitch=0.0,     # Microtonal offset
+        color=0,           # Note color (0-15)
+        releaseVelocity=0, # Release velocity (0-127)
+    ):
         """Initialize shared context state. Called from subclass __init__."""
-        self._cycle = cycle
-        self._octave = octave
-        self._default_velocity = velocity
-        self._default_pan = pan
-        self._scale = None
-        self._scale_root = None
-        self._scale_explicit = False
-        if scale:
-            self._scale, self._scale_root, self._scale_explicit = _parse_scale(scale)
+        # ... stores all defaults (see 1.3.2.3 for full implementation)
     
     def note(self, pattern_str, cycle=None, scale=None, mute=False, bus=None, **kwargs):
         """Canonical pattern creation — delegates to shared builder."""
-        # Build chain through unified constructor (from 1.3.2.2)
         chain = _build_pattern_chain(...)
-        chain._root = self._resolve_root(...)  # Template method
-        self._on_pattern_created(chain)        # Template method
+        chain._root = self._resolve_root(...)
+        self._apply_voice_defaults(chain)  # Apply context defaults to chain
+        self._on_pattern_created(chain)
         return chain
     
     n = note  # Alias
+    
+    def _apply_voice_defaults(self, chain):
+        """Apply context's voice defaults to chain state."""
+        # ... applies all defaults to chain._state
     
     def _resolve_root(self, scale_root, is_explicit):
         """Template method: override in subclasses."""
@@ -115,10 +127,30 @@ class MIDI(vfx.Voice, _CompContextMixin):
 class Comp(_CompContextMixin):
     """Standalone context. Manual trigger/release."""
     
-    def __init__(self, octave=4, scale=None, root=None, velocity=1.0, pan=0.0, parent=None):
+    def __init__(
+        self,
+        octave=4,
+        scale=None,
+        root=None,
+        cycle=4,
+        # Voice attribute defaults (mirror vfx.Voice)
+        velocity=80,       # 0-127 (TrapScript default)
+        length=None,       # None = use pattern event spans (legato); value = override
+        pan=0.0,           # -1 left, 0 center, 1 right
+        output=0,          # Voice output port (0-based)
+        fcut=0.0,          # Mod X / filter cutoff (-1 to 1)
+        fres=0.0,          # Mod Y / filter resonance (-1 to 1)
+        finePitch=0.0,     # Microtonal pitch offset
+        color=0,           # Note color / MIDI channel (0-15)
+        releaseVelocity=0, # Release velocity (0-127)
+        parent=None,       # Optional voice binding for auto-cleanup
+    ):
         self._configure_context(
-            cycle=4, scale=scale, octave=octave,
-            velocity=velocity, pan=pan
+            cycle=cycle, scale=scale, octave=octave,
+            velocity=velocity, length=length, pan=pan,
+            output=output, fcut=fcut, fres=fres,
+            finePitch=finePitch, color=color,
+            releaseVelocity=releaseVelocity,
         )
         self._root_param = root  # Optional root override
         self._parent = parent   # Optional voice binding

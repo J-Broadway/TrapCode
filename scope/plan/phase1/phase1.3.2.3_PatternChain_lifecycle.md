@@ -108,21 +108,50 @@ chain.stop()  # stop() handles all cleanup
 
 Create the shared mixin that both `MIDI` and `Comp` will use. This separates the inheritance refactor from the new `Comp` feature.
 
+**Include all vfx.Voice attributes as defaults.** Since `Comp` has no incoming voice, it needs defaults for all voice parameters. `MIDI` can override these from the incoming voice.
+
 ```python
 class _CompContextMixin:
     """
-    Mixin providing shared pattern creation and scale handling.
+    Mixin providing shared pattern creation, scale handling, and voice defaults.
     
     No __init__ — shared config goes through _configure_context().
     Designed to work with multiple inheritance (MIDI inherits from vfx.Voice).
     """
     
-    def _configure_context(self, cycle=4, scale=None, octave=4, velocity=1.0, pan=0.0):
+    def _configure_context(
+        self,
+        cycle=4,
+        scale=None,
+        octave=4,
+        # Voice attribute defaults (mirror vfx.Voice)
+        velocity=80,       # 0-127 (TrapScript default)
+        length=None,       # See "Length resolution" below
+        pan=0.0,           # -1 left, 0 center, 1 right
+        output=0,          # Voice output port (0-based)
+        fcut=0.0,          # Mod X / filter cutoff (-1 to 1)
+        fres=0.0,          # Mod Y / filter resonance (-1 to 1)
+        finePitch=0.0,     # Microtonal pitch offset
+        color=0,           # Note color / MIDI channel (0-15)
+        releaseVelocity=0, # Release velocity (0-127)
+    ):
         """Initialize shared context state. Called from subclass __init__."""
+        # TrapScript-specific
         self._cycle = cycle
         self._octave = octave
+        
+        # Voice attribute defaults
         self._default_velocity = velocity
+        self._default_length = length
         self._default_pan = pan
+        self._default_output = output
+        self._default_fcut = fcut
+        self._default_fres = fres
+        self._default_finePitch = finePitch
+        self._default_color = color
+        self._default_releaseVelocity = releaseVelocity
+        
+        # Scale parsing
         self._scale = None
         self._scale_root = None
         self._scale_explicit = False
@@ -134,10 +163,24 @@ class _CompContextMixin:
         # Build chain through unified constructor (from 1.3.2.2)
         chain = _build_pattern_chain(...)
         chain._root = self._resolve_root(...)  # Template method
+        # Apply voice defaults to chain state
+        self._apply_voice_defaults(chain)
         self._on_pattern_created(chain)        # Template method
         return chain
     
     n = note  # Alias
+    
+    def _apply_voice_defaults(self, chain):
+        """Apply context's voice defaults to chain state."""
+        chain._state['velocity'] = self._default_velocity / 127.0  # Normalize for internal use
+        chain._state['length'] = self._default_length
+        chain._state['pan'] = self._default_pan
+        chain._state['output'] = self._default_output
+        chain._state['fcut'] = self._default_fcut
+        chain._state['fres'] = self._default_fres
+        chain._state['finePitch'] = self._default_finePitch
+        chain._state['color'] = self._default_color
+        # Note: releaseVelocity stored but may not be used by all output paths
     
     def _resolve_root(self, scale_root, is_explicit):
         """Template method: override in subclasses."""
@@ -147,6 +190,31 @@ class _CompContextMixin:
         """Template method: override for lifecycle policy."""
         pass
 ```
+
+#### Voice attribute inheritance behavior
+
+| Context | Source for defaults |
+|---------|---------------------|
+| `MIDI` | Incoming voice (`v.velocity`, `v.pan`, etc.) — can override via `_configure_context` kwargs |
+| `Comp` | `_configure_context` kwargs — no incoming voice |
+
+For `MIDI`, the refactor should preserve current behavior: incoming voice attributes take precedence. The mixin defaults are fallbacks when no voice attribute is available or when overridden at context level.
+
+#### Length resolution (special case)
+
+Length behaves differently between contexts:
+
+| Context | Primary length source | Behavior |
+|---------|----------------------|----------|
+| `MIDI` | Incoming voice (`v.length`) | Notes sustain for the duration the key is held |
+| `Comp` | Pattern event `whole` span | Notes sustain until next event in pattern (legato-style) |
+
+The `length=` parameter in `_configure_context` is an **override**, not a default:
+
+- If `length=None` (default): use context-appropriate behavior above
+- If `length=<value>`: force all notes to this duration (beats)
+
+Implementation note: `PatternChain.tick()` already calculates duration from event `whole` spans. The `length` override should only apply when explicitly set, not as a fallback.
 
 Then refactor `MIDI` to use it:
 
