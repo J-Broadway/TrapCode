@@ -2021,15 +2021,14 @@ class PatternChain:
                 pan=self._state['pan'],
             )
             
-            # Get parent voice for triggering
+            # Get parent voice for triggering (optional - parentless notes still play)
             parent = None
             if self._midi and hasattr(self._midi, 'parentVoice'):
                 parent = self._midi.parentVoice
             elif self._parent_voice:
                 parent = self._parent_voice
             
-            if parent:
-                note_obj.trigger(cut=False, parent=parent)
+            note_obj.trigger(cut=False, parent=parent)
     
     # --- Lifecycle ---
     
