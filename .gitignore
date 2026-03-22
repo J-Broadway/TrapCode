@@ -3,5 +3,14 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Cursor IDE
+.cursor/
+
+# macOS
+.DS_Store
+
+# Local scratch
+scrap.md
+
 # Strudel experiments (not part of TrapScript)
 scope/strudel/

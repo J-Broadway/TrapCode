@@ -1,84 +1,323 @@
-We need to unify ts.comp and ts.MIDI via a composite design pattern that passes inheretence down to its children.
-ts.MIDI is different than ts.comp in that .trigger() and .stop() is triggered via parent voice.
+# Phase 1.3.3.1: Composite Design Pattern Contract
 
-The _CompContext object has the following kwarg attributes.
-When these attributes are set a the comp level PatternChain .note() / .n() should inherit it be default.
+## Goal
 
-| kwarg | default | where used | notes |
-|---|---|---|---|
-| octave | 4 | `Comp.__init__` | Default octave for note-name root parsing |
-| scale | None | `Comp.__init__` + `_configure_context` | Scale string, e.g. `"c:minor"` |
-| root | None | `Comp.__init__` | Optional root override for implicit scales |
-| cycle | 4 | `Comp.__init__` + `_configure_context` | Default pattern cycle (beats) |
-| velocity | 80 | `_configure_context` | Stored as default voice velocity |
-| length | None | `_configure_context` | Default note length override |
-| pan | 0.0 | `_configure_context` | Default pan -1..1 |
-| output | 0 | `_configure_context` | Default output port |
-| fcut | 0.0 | `_configure_context` | Default mod X / cutoff |
-| fres | 0.0 | `_configure_context` | Default mod Y / resonance |
-| finePitch | 0.0 | `_configure_context` | Default microtuning offset |
-| color | 0 | `_configure_context` | Default note color/channel |
-| releaseVelocity | 0 | `_configure_context` | Stored default release velocity |
-| parent | None | `Comp.__init__` |  |
+Unify `ts.comp` and `ts.MIDI` under one scalable composition model that supports:
 
-Current Pattern Chain *kwargs
+- inheritance from context -> pattern -> instance
+- overlap/multi-instance playback
+- per-instance lifecycle control
+- reusable mini-notation timing semantics for future attribute modulation
 
-kwarg	default	notes
-cycle	None	Per-pattern override; falls back to context cycle
-scale	None	Per-pattern scale override; falls back to context scale
-mute	False	Creates ghost/silent pattern
-bus	None	Optional bus name for cross-scope state
-c	alias	Alias for cycle (via **kwargs alias resolution)
-**kwargs	—	Currently used for aliases (not arbitrary free-form options)
+`MIDI` remains voice-bound (auto lifecycle), while `Comp` remains manual lifecycle.
 
+## Architectural Decision (locked)
 
+Use Composite + Cascading Policy:
 
-## Example
+- `Comp`/`MIDI` = context node (defaults + child registry)
+- `PatternChain` = pattern owner/controller node
+- `PatternInstance` = leaf runtime node (actual runner)
+
+The update loop ticks `PatternInstance` objects.
+
+## Scope Inheritance Contract
+
+Any trigger/policy option resolves with precedence:
+
+1. explicit instance arg (e.g. `trigger(...)`)
+2. pattern override (e.g. `comp.n(..., velocity=...)`)
+3. context default (e.g. `ts.comp(..., velocity=...)`)
+4. library default
+
+This rule is global and applies to all future options.
+
+## Context Defaults (current + planned)
+
+| kwarg | default | notes |
+|---|---|---|
+| octave | 4 | Default octave for note-name root parsing |
+| scale | None | Context scale (`"c:minor"`) |
+| root | None | Root override for implicit scales |
+| cycle | 4 | Default pattern cycle in beats |
+| velocity | 80 | Default voice velocity |
+| length | None | Default note length override |
+| pan | 0.0 | Default pan |
+| output | 0 | Default output port |
+| fcut | 0.0 | Default Mod X / cutoff |
+| fres | 0.0 | Default Mod Y / resonance |
+| finePitch | 0.0 | Default microtuning offset |
+| color | 0 | Default note color/channel |
+| releaseVelocity | 0 | Default release velocity |
+| parent | None | Voice binding (Comp only; MIDI already bound) |
+| bypass | False | Output suppression policy (state still ticks) |
+
+## Pattern API Shape (recommended)
+
+Support both constructor kwargs and fluent setters, with one internal policy map.
+
+**Implementation phasing:** Deliver in **two slices** (see [Implementation phasing](#implementation-phasing-locked) below).
+
+- **Slice A (core):** `Comp` / `MIDI` and `PatternChain` use **constructor kwargs** (and existing pattern-level kwargs) for voice attributes — **static numeric values** for precedence / `Policy` / tests. No fluent mini-notation strings on context or pattern yet.
+- **Slice B (fluency):** Add **fluent temporal setters** (`comp.velocity("50 80")`, `pat.velocity("80 70 60")`, etc.), unified parser core, coercers, `?` / `None` / `Null(attr)` for **Phase-1 Attribute Scope** only.
+
+### Usage mock (public API) — full target after Slice B
 
 ```python
-comp = ts.comp(scale="c:minor")
-pattern = comp.n("[0 1 2 3 4]").trigger() # Scale is c:minor
-pattern2 = comp.n("[3 2 1 0]", scale="d:minor").trigger() # Scale can be overwritten at child level
+comp = ts.comp(scale="c:minor", velocity=80)
+comp.velocity("50 80").output("0 1?")  # fluent dynamic defaults (Slice B)
+
+pat = comp.n("0 1 2 3", cycle=2)       # inherits comp defaults
+pat2 = comp.n("3 2 1 0", scale="d:minor", velocity="20 [30 40] 100")
 ```
 
-## Polyrythmic chaining with mini-notation
-I would like to make use of strudel's mini notation parsing in order to effectively set PatternChain attributes.
-This would allow for intricate polyrythms with  verry little code form user.
+### Slice A usage (intermediate)
 
-I believe it should be available for these attributes (with examples), however, we need a design pattern that would allow us to add more or exclude others in the future if needed.
-
-- ocative # "[4 5 6]"
-- scale # "c:minor e:minor g:major"
-- root # 
-- cycle
-- velocity
-- length
-- pan
-- output
-- fcut
-- fres
-- finePitch
-- color
-- releaesVelocity
-
-I'm uncertain if in order for the above to work if we'd need to create a separate mini-notation parsers for _CompContext? Perhaps there is a design pattern that would gracefully allow us to split the parsers while mainting the temporal aspect so if we make temporal changes to the parser it propogates to both parsers without having to write code twice. Looking for feedback on this
-
-Furthermore for the available attributes above, we'd need to gracefully handle scenarios where root is specified like 'g5' and also a octave '3'
-
-
-Example:
 ```python
-comp = ts.comp(scale="c:minor").velocity("50 80").output("0 1?") # Using mini notation parsing engine to flip between velocity 50 <--> 80 for the comp and a 50% chance to output to 1.
-pat = comp.n("0 1 2 3").trigger() # Output --> 0: 50 velocity, 1: 80 velocity, 2: 50 velocity, 3: 80 velocity
-pat2 = comp.n("0 1 2 3").velocity("20 [30 40] 100").trigger() # can override parent at child level, comp .output() still in effect.
+comp = ts.comp(scale="c:minor", velocity=80, output=0)
+pat = comp.n("0 1 2 3", cycle=2, velocity=72)
+pat.trigger(cut=False)
 ```
 
-Currently, if my understanding is correct, PatternChain is not composable with _CompContext and lacks the proper Composite Design pattern to make the above possible.
+### Fluent return contract (locked)
 
-I am also unsure on what the best syntax should be if something like
+When fluent setters exist (**Slice B**), the following applies:
+
+- Context fluent setters on `Comp`/`MIDI` return the same context object (`self`)
+- Pattern fluent setters on `PatternChain` return the same pattern object (`self`)
+- (If exposed) instance mutators on `PatternInstance` return the same instance (`self`)
+
+This ensures stable chainability:
+
+```python
 comp = ts.comp(scale="c:minor").velocity("50 80").output("0 1?")
-is best or something like this
-comp = ts.comp(scale="c:minor", velocity="50 80", output="0 1?")
-Maybe both? I think I prefer the former as it more follows Strudel's syntax but interested to hear your thoughts
+pat = comp.n("0 1").velocity("80 70 60")  # pattern-level override of inherited comp defaults
+```
 
-Pleaes I'm looking for feedback. It is critical we get this right, for the sustained future scaleability of Trapscript.
+Inheritance order remains:
+
+1. instance explicit args
+2. pattern overrides
+3. context defaults
+4. library defaults
+
+### Trigger/lifecycle mock (public API)
+
+```python
+pat.trigger(loop=False, direction="forward", cut=False)  # spawn runner
+pat.trigger(loop=False, direction="forward", cut=False)  # spawn another
+
+for inst in pat.instances:          # oldest -> newest
+    if inst.phase > 0.5:
+        inst.stop()                 # per-instance control
+```
+
+### Composite iteration mock (public API)
+
+```python
+for pattern in comp.patterns:
+    if pattern.running():
+        pattern.pause()  # default: pause all active instances in owner
+```
+
+## PatternInstance Contract
+
+- stable per-owner integer `inst.id` (`1,2,3...`)
+- `inst.created_at_tick` from engine tick at spawn
+- explicit lifecycle state: `created|running|paused|stopped`
+- runtime internals in `inst.runtime` (phase/tick/durations/etc.)
+- convenience read proxies allowed (`inst.phase`, `inst.tick`)
+
+Owner-level state on `PatternChain` is derived:
+
+- `running()` => any owned instance running
+- `paused()` => no running and at least one paused
+- `active()` => any owned instance running or paused
+
+`active` is exposed as a public property at both `PatternChain` and `Comp` levels:
+
+- `pat.active` => any instance in that pattern is running or paused
+- `comp.active` => any pattern in that comp has `active == True`
+
+## Composite aggregation helper (locked)
+
+To keep future composite methods scalable, implement shared internal helpers:
+
+- `_any_child(predicate)`
+- `_all_children(predicate)`
+- `_map_children(fn)`
+
+Derived state properties should use these helpers instead of custom loops per method.
+This prevents repeated boilerplate when adding future state predicates/actions.
+
+## Mini-Notation Strategy (no duplicate parsers)
+
+Do not create separate full parsers for context vs pattern attributes.
+Use one temporal parser core + per-attribute value coercers.
+
+- parser core handles timing/sequence operators (`[]`, `!`, `?`, etc.)
+- coercers adapt values for specific targets:
+  - velocity/output/pan/fcut/fres...
+  - root/scale parsing and note-name normalization
+  - nullable domains (`None`) where allowed
+
+This keeps temporal semantics unified across all attributes.
+
+## Probability Operator (`?`) Contract
+
+`?` is treated as a native Strudel probability/degrade operator.
+For attribute patterns, degraded events resolve to attribute-specific null behavior.
+
+Contract for value `x?`:
+
+- emit `x` with probability `p` (default 0.5)
+- otherwise emit `Null(attr)` (not `hold`)
+
+Contract for literal `None`:
+
+- `None` is explicit deterministic `Null(attr)` (no probability)
+- `None?` is invalid in phase 1 (ambiguous double-null syntax)
+
+### `Null(attr)` mapping (phase 1 target)
+
+| Attribute | Null behavior |
+|---|---|
+| velocity | `0` (silent note) |
+| length | `drop_note` |
+| output | `drop_note` |
+| pan | `0` (center) |
+| fcut | `0` |
+| fres | `0` |
+| finePitch | `0` |
+| color | default color (`0`) |
+| releaseVelocity | default (`0`) |
+
+Notes:
+
+- `drop_note` means the note event is not emitted for that step.
+- For users, `drop_note` is equivalent to a rest at emit time (e.g. output degrade behaves like no-note for that step, similar to `~` in note patterns).
+- Structural attributes (`scale`, `root`, `octave`, `cycle`) defer `?` support to a follow-up phase unless explicit per-attribute policy is defined.
+
+## Phase-1 Attribute Scope (locked)
+
+Phase-1 mini-notation/coercer modulation includes:
+
+- `velocity`
+- `length`
+- `output`
+- `pan`
+- `fcut`
+- `fres`
+- `finePitch`
+- `color`
+- `releaseVelocity`
+
+Deferred to follow-up phase:
+
+- `scale`
+- `root`
+- `octave`
+- `cycle`
+
+**Current runtime note (`cycle`):** In `trapscript.py` today, cycle length is a **single scalar** beats-per-cycle per chain (optionally **dynamic** via callable/knob, **latched at cycle boundaries** in `Pattern.tick`). There is **no** mini-notation sequencer for cycle (e.g. Strudel-style **polymetric** step lengths like `"2 2 1"` as a `.cycle(...)` pattern). Supporting sequenced / probabilistic / nullable `cycle` is **out of scope for Phase 1** and implies additional temporal design in a follow-up phase.
+
+## Emit Pipeline Gate Order (locked)
+
+For each note step:
+
+1. Resolve attribute values for the step.
+2. Apply `?` degrade to produce concrete or `Null(attr)` values.
+3. If `length` or `output` resolves to `drop_note`, abort note emission immediately.
+4. Otherwise emit note with resolved attributes.
+
+This keeps note suppression deterministic and avoids creating-and-discarding voice events.
+
+## Typed literal support requirement
+
+Target examples like:
+
+```python
+"0 1 2 [None 3]!2 4"
+```
+
+must be supported through parser extension points (typed literals + coercers), not ad-hoc regex hacks in each feature.
+
+Contract:
+
+- parser should emit literal token values including `None` for phase-1 modulated attributes
+- coercer maps `None` -> `Null(attr)` deterministically for phase-1 modulated attributes
+- structural attrs keep `None` and `?` support deferred until explicitly enabled in follow-up phase
+- clear errors for unsupported token/domain combinations
+
+## Backend mock (critical internal interfaces)
+
+```python
+class Policy:
+    # immutable/resolved snapshot for a runner
+    loop: bool
+    direction: str
+    cut: bool
+    bypass: bool
+    velocity: object
+    output: object
+
+class PatternChain:
+    defaults: dict           # owner-level overrides
+    instances: OrderedDict[int, PatternInstance]
+    def resolve(self, trigger_overrides: dict) -> Policy: ...
+    def trigger(self, **kwargs) -> "PatternChain": ...
+
+class PatternInstance:
+    id: int
+    created_at_tick: int
+    state: str
+    runtime: object
+    policy: Policy
+```
+
+## Implementation phasing (locked)
+
+| Slice | Focus | Out of scope until done |
+|------|--------|-------------------------|
+| **A — Core composite** | `PatternInstance`, instance registry, tick targets `PatternInstance`, `Policy` + `resolve()`, trigger kwargs (`loop`, `direction`, `cut`), `pat.instances`, `comp.patterns`, aggregation helpers, **bypass** cascading, tests with **scalar** kwargs | Fluent attribute strings on context/pattern; `?` on attributes; `None` in attribute mini-notation; typed-literal parser extension for modulated attrs |
+| **B — Temporal fluency** | Fluent setters on `Comp`/`MIDI`/`PatternChain`; one temporal parser core + per-attribute coercers; `?`, literal `None` → `Null(attr)`, emit pipeline steps 2–3 for phase‑1 attributes; validation checklist items that require parser | (unchanged) structural `scale`/`root`/`octave`/`cycle` mini-notation — still deferred per [Resolved decisions](#resolved-decisions) |
+
+**Rationale:** Validate ownership, overlap, and precedence on a small API surface first; layer Strudel-style attribute strings on top of a working `resolve()` / `Policy` path so parser work is not reworked when cascade rules change.
+
+## Implementation Sequence
+
+**Slice A — Core composite**
+
+1. Introduce `PatternInstance` and owner instance registry in `PatternChain`
+2. Move update loop tick target from chain runtime -> instance runtime
+3. Implement policy resolution precedence (instance > pattern > context > default) using **scalar** context/pattern/trigger values
+4. Add trigger options (`loop`, `direction`, `cut`) on top of instance model
+5. Add per-instance/public iteration APIs (`pat.instances`, `comp.patterns`)
+6. Add bypass cascading semantics and tests for Slice A checklist items
+
+**Slice B — Temporal fluency**
+
+7. Extend parser core with typed literals (`None`) + coercer layer for **Phase-1 Attribute Scope** attributes
+8. Implement fluent setters on `Comp`/`MIDI`/`PatternChain` that feed the same policy map
+9. Full emit pipeline (including `?` degrade and `Null(attr)` gating) per [Emit Pipeline Gate Order](#emit-pipeline-gate-order-locked); complete remaining validation checklist rows that depend on parser
+
+## Validation Checklist
+
+**Slice A** covers inheritance, instances, triggers, ordering, lifecycle aggregates, and structural deferral. **Slice B** covers `?`, literal `None`, `None?`, and parser/domain errors for phase‑1 modulated attributes.
+
+- context defaults inherit to patterns unless overridden
+- pattern overrides inherit to instances unless overridden on trigger
+- `trigger(cut=False)` creates additional instances without registry corruption
+- `pat.instances` order is oldest -> newest
+- per-instance stop/pause works while sibling instances continue
+- `created_at_tick` is present and stable
+- `running()/paused()/active()` reflect mixed instance states correctly
+- `?` degraded attribute values resolve using `Null(attr)` mapping
+- literal `None` resolves deterministically to `Null(attr)` mapping
+- `None?` is rejected with clear error
+- structural attrs reject/defer `?` semantics until explicitly enabled
+- parser rejects invalid domain/value combinations with clear errors
+
+## Resolved decisions
+
+1. **Structural attrs (`scale`, `root`, `octave`, `cycle`) and `None` / `?`:** Explicitly **deferred past Phase 1** for this composite work. Phase 1 implements only **Phase-1 Attribute Scope** (velocity, length, output, pan, fcut, fres, finePitch, color, releaseVelocity) with the `?` and `None` contracts in this document. **When** and **how** structural fields gain mini-notation, nullability, and probability — including whether `cycle` becomes a **sequenced** pattern (polymetric lengths) versus staying **scalar-only** — will be specified in a **follow-up plan**, after Phase 1 composite + parser foundations are in place. This is **not** a blocker to start coding Phase 1.

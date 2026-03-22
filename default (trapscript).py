@@ -10,7 +10,7 @@ def createDialog():
 
 def onTriggerVoice(incomingVoice):
     midi = ts.MIDI(incomingVoice)
-    # midi.trigger()
+    midi.trigger()
 
 def onReleaseVoice(incomingVoice):
     ts.stop_patterns_for_voice(incomingVoice)
